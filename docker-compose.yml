@@ -1,0 +1,20 @@
+services:
+  sklad:
+    build: .
+    image: impress-sklad:latest
+    container_name: impress-sklad
+    restart: unless-stopped
+    # Открыто в локальной сети сервера: http://<IP-сервера>:8080
+    # Для «только localhost + SSH-туннель» замените на "127.0.0.1:8080:3000".
+    ports:
+      - "8080:3000"
+    env_file:
+      - .env
+    volumes:
+      - sklad-data:/app/data
+      # Оффлайн-лицензия (подписанная). «Выключить» = заменить этот файл на
+      # выпущенный с --inactive и перезапустить контейнер.
+      - ./ops/license/license.json:/app/license.json:ro
+
+volumes:
+  sklad-data:

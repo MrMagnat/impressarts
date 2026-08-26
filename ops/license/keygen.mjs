@@ -1,0 +1,13 @@
+import { generateKeyPairSync } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+const dir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+const priv = privateKey.export({ type: "pkcs8", format: "pem" });
+const pubDer = publicKey.export({ type: "spki", format: "der" });
+const pubB64 = Buffer.from(pubDer).toString("base64");
+fs.writeFileSync(path.join(dir, "vendor-private.pem"), priv);
+fs.writeFileSync(path.join(dir, "vendor-public.b64"), pubB64 + "\n");
+console.log("PRIVATE key -> ops/license/vendor-private.pem  (ХРАНИ ТОЛЬКО У СЕБЯ, не на сервере клиента!)");
+console.log("PUBLIC  key (LICENSE_PUBKEY):");
+console.log(pubB64);

@@ -1,0 +1,308 @@
+import Fastify from "fastify";
+import cookie from "@fastify/cookie";
+import multipart from "@fastify/multipart";
+import fstatic from "@fastify/static";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { pipeline } from "node:stream/promises";
+
+import { db, initSchema, DATA_DIR, getSetting, setSetting, currentDate } from "./db.js";
+import {
+  meta,
+  treeChildren,
+  positionCard,
+  searchPositions,
+  dashboard,
+} from "./analytics.js";
+import { weeklyReport, monthlyReport, monthEnds, competitive, scopeReport } from "./reports.js";
+import { reportHtml, scopeReportHtml, positionReportHtml } from "./report-html.js";
+import { htmlToPdf, PdfUnavailable } from "./pdf.js";
+import {
+  checkPassword,
+  setSession,
+  clearSession,
+  isAuthed,
+  requireAuth,
+  ensurePassword,
+  defaultPassword,
+} from "./auth.js";
+import { importExcel } from "./etl/import-excel.js";
+import { ingestSnapshot } from "./etl/ingest.js";
+import { startLicense, licenseStatus, isLocked } from "./license.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WEB_DIST = path.resolve(__dirname, "../../web/dist");
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
+const HOST = process.env.HOST ?? "0.0.0.0";
+
+initSchema();
+ensurePassword();
+
+const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
+
+await app.register(cookie, {
+  secret: process.env.COOKIE_SECRET ?? "sklad-demo-secret-change-me",
+});
+await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024 } });
+
+// ---------- LICENSE KILL-SWITCH ----------
+app.get("/api/license/status", async () => licenseStatus());
+app.addHook("onRequest", async (req, reply) => {
+  if (!req.url.startsWith("/api/")) return;
+  if (req.url.startsWith("/api/license/status")) return;
+  if (isLocked()) {
+    reply.code(503).send({
+      locked: true,
+      error: "Доступ приостановлен поставщиком ПО. Обратитесь к поставщику.",
+      reason: licenseStatus().reason,
+    });
+  }
+});
+
+// ---------- AUTH ----------
+app.post("/api/auth/login", async (req, reply) => {
+  const body = (req.body ?? {}) as { password?: string };
+  if (!body.password || !checkPassword(body.password)) {
+    return reply.code(401).send({ error: "Неверный пароль" });
+  }
+  setSession(reply);
+  return { ok: true };
+});
+
+app.post("/api/auth/logout", async (_req, reply) => {
+  clearSession(reply);
+  return { ok: true };
+});
+
+app.get("/api/auth/me", async (req) => ({ authenticated: isAuthed(req) }));
+
+// ---------- PROTECTED API ----------
+const api = async (app: any) => {
+  app.addHook("preHandler", requireAuth);
+
+  app.get("/meta", async () => meta());
+
+  app.get("/catalog/tree", async (req: any) => {
+    const { tip, vid, grp } = req.query as Record<string, string>;
+    return treeChildren({ tip, vid, grp });
+  });
+
+  app.get("/catalog/position/:id", async (req: any, reply: any) => {
+    const card = positionCard(req.params.id);
+    if (!card) return reply.code(404).send({ error: "Позиция не найдена" });
+    return card;
+  });
+
+  app.get("/catalog/search", async (req: any) => {
+    const q = (req.query.q ?? "").toString();
+    if (q.trim().length < 2) return [];
+    return searchPositions(q, 30);
+  });
+
+  app.get("/dashboard", async () => dashboard());
+
+  // reports
+  app.get("/reports/weeks", async () => {
+    const dates = (db().prepare("SELECT date FROM snapshot ORDER BY date DESC").all() as {
+      date: string;
+    }[]).map((r) => r.date);
+    return dates;
+  });
+  app.get("/reports/months", async () => monthEnds().reverse());
+
+  app.get("/reports/weekly", async (req: any) => weeklyReport(req.query.date));
+  app.get("/reports/monthly", async (req: any) => monthlyReport(req.query.month));
+
+  app.get("/reports/scope", async (req: any) => {
+    const q = req.query as Record<string, string>;
+    return scopeReport(
+      { tip: q.tip, vid: q.vid, grp: q.grp },
+      (q.kind as any) === "monthly" ? "monthly" : "weekly",
+      q.period,
+    );
+  });
+
+  app.get("/reports/competitive", async (req: any) => {
+    const q = req.query as Record<string, string>;
+    return competitive({
+      type: (q.type as any) ?? "category",
+      id: q.id,
+      tip: q.tip,
+      vid: q.vid,
+      grp: q.grp,
+      dim: (q.dim as any) ?? "counterparty",
+    });
+  });
+
+  const pdfRoute = (kind: "weekly" | "monthly") => async (req: any, reply: any) => {
+    const key = kind === "weekly" ? req.query.date : req.query.month;
+    const html = reportHtml(kind, key);
+    try {
+      const pdf = await htmlToPdf(html);
+      reply
+        .header("Content-Type", "application/pdf")
+        .header(
+          "Content-Disposition",
+          `inline; filename="report-${kind}-${key ?? currentDate()}.pdf"`,
+        )
+        .send(pdf);
+    } catch (e) {
+      if (e instanceof PdfUnavailable) {
+        // graceful fallback: return the printable HTML instead
+        reply.header("Content-Type", "text/html; charset=utf-8").send(html);
+        return;
+      }
+      throw e;
+    }
+  };
+  app.get("/reports/weekly.pdf", pdfRoute("weekly"));
+  app.get("/reports/monthly.pdf", pdfRoute("monthly"));
+
+  // custom-scope PDF: category / subcategory / position
+  const sendHtmlOrPdf = async (reply: any, html: string, filename: string) => {
+    // HTTP headers must be ASCII: strip non-ASCII, keep a UTF-8 filename* fallback
+    const ascii = filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+    const disposition =
+      `inline; filename="${ascii}.pdf"; ` +
+      `filename*=UTF-8''${encodeURIComponent(filename)}.pdf`;
+    try {
+      const pdf = await htmlToPdf(html);
+      reply
+        .header("Content-Type", "application/pdf")
+        .header("Content-Disposition", disposition)
+        .send(pdf);
+    } catch (e) {
+      if (e instanceof PdfUnavailable) {
+        reply.header("Content-Type", "text/html; charset=utf-8").send(html);
+        return;
+      }
+      throw e;
+    }
+  };
+  app.get("/reports/scope.pdf", async (req: any, reply: any) => {
+    const q = req.query as Record<string, string>;
+    const html = scopeReportHtml({ tip: q.tip, vid: q.vid, grp: q.grp });
+    await sendHtmlOrPdf(reply, html, `scope-${q.grp ?? q.vid ?? q.tip ?? "all"}`);
+  });
+  app.get("/reports/position.pdf", async (req: any, reply: any) => {
+    const id = (req.query as any).id as string;
+    const html = positionReportHtml(id);
+    await sendHtmlOrPdf(reply, html, `position-${id}`);
+  });
+  app.get("/reports/weekly.html", async (req: any, reply: any) =>
+    reply.type("text/html").send(reportHtml("weekly", req.query.date)),
+  );
+  app.get("/reports/monthly.html", async (req: any, reply: any) =>
+    reply.type("text/html").send(reportHtml("monthly", req.query.month)),
+  );
+
+  // settings
+  app.get("/settings/prices", async () => {
+    const cur = currentDate();
+    return db()
+      .prepare(
+        `SELECT pr.vid, pr.price_per_kg AS price,
+                COALESCE(t.kg,0) kg, COALESCE(t.kg,0)*pr.price_per_kg AS money,
+                COALESCE(t.tip,'') tip
+         FROM price pr
+         LEFT JOIN (
+           SELECT p.vid, p.tip, SUM(f.kg) kg FROM fact f JOIN position p ON p.position_id=f.position_id
+           WHERE f.date=@cur GROUP BY p.vid, p.tip
+         ) t ON t.vid = pr.vid
+         ORDER BY money DESC`,
+      )
+      .all({ cur });
+  });
+
+  app.put("/settings/prices", async (req: any) => {
+    const items = (req.body?.prices ?? []) as { vid: string; price: number }[];
+    const d = db();
+    const updPrice = d.prepare("UPDATE price SET price_per_kg=? WHERE vid=?");
+    const updFact = d.prepare(
+      "UPDATE fact SET money = ROUND(kg * ?) WHERE position_id IN (SELECT position_id FROM position WHERE vid=?)",
+    );
+    const updBatch = d.prepare(
+      "UPDATE batch SET price_per_kg=?, money = ROUND(kg * ?) WHERE position_id IN (SELECT position_id FROM position WHERE vid=?)",
+    );
+    d.exec("BEGIN");
+    try {
+      for (const it of items) {
+        const price = Number(it.price);
+        if (!Number.isFinite(price) || price < 0) continue;
+        updPrice.run(price, it.vid);
+        updFact.run(price, it.vid);
+        updBatch.run(price, price, it.vid);
+      }
+      d.exec("COMMIT");
+    } catch (e) {
+      d.exec("ROLLBACK");
+      throw e;
+    }
+    return { ok: true, updated: items.length };
+  });
+
+  app.get("/settings/general", async () => ({
+    currency: getSetting("currency", "₽"),
+    expiryWarnDays: parseInt(getSetting("expiry_warn_days", "60"), 10),
+    currentDate: currentDate(),
+    passwordSet: true,
+    uploads: fs
+      .readdirSync(path.join(DATA_DIR, "uploads"))
+      .filter((f) => f.endsWith(".xlsx"))
+      .sort()
+      .reverse(),
+  }));
+
+  app.put("/settings/general", async (req: any) => {
+    const b = req.body ?? {};
+    if (b.currency) setSetting("currency", String(b.currency));
+    if (b.expiryWarnDays != null) setSetting("expiry_warn_days", String(parseInt(b.expiryWarnDays, 10)));
+    if (b.password) setSetting("password", String(b.password));
+    return { ok: true };
+  });
+
+  app.post("/settings/import", async (req: any, reply: any) => {
+    const file = await req.file();
+    if (!file) return reply.code(400).send({ error: "Файл не получен" });
+    const safe = file.filename.replace(/[^\w.\-]/g, "_");
+    const dest = path.join(DATA_DIR, "uploads", `${Date.now()}_${safe}`);
+    await pipeline(file.file, fs.createWriteStream(dest));
+    try {
+      const res = await importExcel(dest);
+      const ing = ingestSnapshot(res);
+      return { ok: true, date: ing.date, positions: ing.positions, rows: res.rows.length };
+    } catch (e: any) {
+      return reply.code(400).send({ error: e?.message ?? "Ошибка импорта" });
+    }
+  });
+};
+
+await app.register(api, { prefix: "/api" });
+
+// ---------- STATIC SPA ----------
+if (fs.existsSync(WEB_DIST)) {
+  await app.register(fstatic, { root: WEB_DIST, wildcard: true });
+  app.setNotFoundHandler((req, reply) => {
+    if (req.url.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
+    return reply.sendFile("index.html");
+  });
+} else {
+  app.get("/", async (_req, reply) =>
+    reply
+      .type("text/html")
+      .send(
+        `<h2>Складской дашборд — API запущен</h2><p>Фронтенд не собран. Выполните <code>npm run build</code> или запустите dev-режим (<code>npm run dev</code>).</p><p>Пароль по умолчанию: <b>${defaultPassword()}</b></p>`,
+      ),
+  );
+}
+
+await startLicense((m) => app.log.info(m));
+
+app
+  .listen({ port: PORT, host: HOST })
+  .then(() => app.log.info(`Складской дашборд на http://${HOST}:${PORT}`))
+  .catch((e) => {
+    app.log.error(e);
+    process.exit(1);
+  });

@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+web/dist
+server/dist
+data/*.db
+data/*.db-*
+data/uploads/*
+data/license.cache.json
+ops/license/vendor-private.pem
+.git
+.env
+*.log

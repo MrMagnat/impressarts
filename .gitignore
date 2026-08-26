@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.log
+data/*.db
+data/*.db-*
+data/uploads/*
+!data/uploads/.gitkeep
+.env
+web/dist/
+server/dist/
+.DS_Store
+*.local
+
+# license authority (vendor secret — NEVER on client server)
+ops/license/vendor-private.pem
+
+# real client data — NEVER commit (public repo)
+data/seed/*.xlsx
+data/license.cache.json

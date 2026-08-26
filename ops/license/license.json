@@ -1,0 +1,10 @@
+{
+  "payload": {
+    "active": true,
+    "customer": "Impress client",
+    "exp": 1794914318,
+    "iat": 1787138318,
+    "id": "impress-sklad-001"
+  },
+  "sig": "HyXAOhBk5cNa4SMkjKsRLRg+waMSLoAw8fzQXsVeqVi8lrb7DQrgM4F4sDKS6JYhp22DMxkvA1WJGFK4HaCUDg=="
+}
