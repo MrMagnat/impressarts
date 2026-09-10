@@ -1,32 +1,27 @@
 import { db, currentDate } from "./db.js";
 import { round, monthKey } from "./util.js";
 import { prevDate, priorDates } from "./analytics.js";
+import {
+  aggAt,
+  totalAt as aggTotalAt,
+  scopeTotalAt,
+  childBreakdownAt,
+  hasDetail,
+  seriesFor,
+  type KM,
+} from "./history.js";
 
 const D = () => db();
 
-interface KM {
-  kg: number;
-  money: number;
-}
 const ZERO: KM = { kg: 0, money: 0 };
 
 function delta(cur: number, base: number) {
   return { abs: round(cur - base), pct: base ? round(((cur - base) / base) * 100, 1) : 0 };
 }
 
-/** Aggregate kg/money at a date grouped by a column, as a Map. */
-function aggAt(date: string, col: string): Map<string, KM> {
-  const rows = D()
-    .prepare(
-      `SELECT ${col} AS k, SUM(f.kg) kg, SUM(f.money) money
-       FROM fact f JOIN position p ON p.position_id=f.position_id
-       WHERE f.date=? GROUP BY ${col}`,
-    )
-    .all(date) as any[];
-  return new Map(rows.map((r) => [String(r.k), { kg: r.kg, money: r.money }]));
-}
+type Level = "tip" | "vid";
 
-function avgMaps(dates: string[], col: string): Map<string, KM> {
+function avgMaps(dates: string[], col: Level): Map<string, KM> {
   const acc = new Map<string, KM>();
   for (const dt of dates) {
     for (const [k, v] of aggAt(dt, col)) {
@@ -55,11 +50,8 @@ function node(key: string, label: string, cur: KM, prev: KM, avg: KM) {
 
 /** Shared comparison builder: totals + tip→vid breakdown + top movers. */
 function buildComparison(targetDate: string, prevD: string | null, avgDates: string[]) {
-  // totals
-  const totAt = (dt: string) =>
-    (D().prepare("SELECT COALESCE(SUM(kg),0) kg, COALESCE(SUM(money),0) money FROM fact WHERE date=?").get(
-      dt,
-    ) as unknown as KM);
+  // totals (агрегат: работает и за даты, у которых деталь уже сжата)
+  const totAt = (dt: string) => aggTotalAt(dt);
   const cur = totAt(targetDate);
   const prev = prevD ? totAt(prevD) : ZERO;
   const avg =
@@ -71,13 +63,13 @@ function buildComparison(targetDate: string, prevD: string | null, avgDates: str
       : cur;
   const avgT: KM = { kg: avg.kg / Math.max(avgDates.length, 1), money: avg.money / Math.max(avgDates.length, 1) };
 
-  const tipCur = aggAt(targetDate, "p.tip");
-  const tipPrev = prevD ? aggAt(prevD, "p.tip") : new Map();
-  const tipAvg = avgMaps(avgDates.length ? avgDates : [targetDate], "p.tip");
+  const tipCur = aggAt(targetDate, "tip");
+  const tipPrev = prevD ? aggAt(prevD, "tip") : new Map<string, KM>();
+  const tipAvg = avgMaps(avgDates.length ? avgDates : [targetDate], "tip");
 
-  const vidCur = aggAt(targetDate, "p.tip || '¦' || p.vid");
-  const vidPrev = prevD ? aggAt(prevD, "p.tip || '¦' || p.vid") : new Map();
-  const vidAvg = avgMaps(avgDates.length ? avgDates : [targetDate], "p.tip || '¦' || p.vid");
+  const vidCur = aggAt(targetDate, "vid");
+  const vidPrev = prevD ? aggAt(prevD, "vid") : new Map<string, KM>();
+  const vidAvg = avgMaps(avgDates.length ? avgDates : [targetDate], "vid");
 
   const tips = [...tipCur.entries()]
     .sort((a, b) => b[1].money - a[1].money)
@@ -99,7 +91,7 @@ function buildComparison(targetDate: string, prevD: string | null, avgDates: str
 
   // top movers by money vs prev
   let movers: any[] = [];
-  if (prevD) {
+  if (prevD && hasDetail(targetDate) && hasDetail(prevD)) {
     movers = D()
       .prepare(
         `SELECT p.name, p.tip, p.vid,
@@ -164,7 +156,7 @@ export function weeklyReport(date?: string) {
 /** Map YYYY-MM -> last snapshot date within that month. */
 export function monthEnds(): { month: string; date: string }[] {
   const rows = D()
-    .prepare("SELECT substr(date,1,7) m, MAX(date) d FROM snapshot GROUP BY m ORDER BY m")
+    .prepare("SELECT substr(date,1,7) m, MAX(date) d FROM fact_agg GROUP BY m ORDER BY m")
     .all() as { m: string; d: string }[];
   return rows.map((r) => ({ month: r.m, date: r.d }));
 }
@@ -223,7 +215,9 @@ export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?
   // period axis
   const weekly = kind === "weekly";
   const dateList = weekly
-    ? (D().prepare("SELECT date FROM snapshot ORDER BY date").all() as { date: string }[]).map((r) => r.date)
+    ? (D().prepare("SELECT DISTINCT date FROM fact_agg ORDER BY date").all() as { date: string }[]).map(
+        (r) => r.date,
+      )
     : monthEnds().map((e) => e.date);
   const months = weekly ? [] : monthEnds();
 
@@ -238,12 +232,7 @@ export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?
   const nAvg = weekly ? 8 : 3;
   const avgDates = dateList.slice(Math.max(0, idx - nAvg), idx);
 
-  const totalAt = (date: string): KM =>
-    (D().prepare(
-      `SELECT COALESCE(SUM(f.money),0) money, COALESCE(SUM(f.kg),0) kg
-       FROM fact f JOIN position p ON p.position_id=f.position_id
-       WHERE f.date=@date AND ${clause}`,
-    ).get({ date, ...bind }) as unknown as KM);
+  const totalAt = (date: string): KM => scopeTotalAt(date, scope);
 
   const cur = totalAt(target);
   const prevT = prev ? totalAt(prev) : ZERO;
@@ -254,16 +243,9 @@ export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?
       })()
     : cur;
 
-  // children breakdown
+  // children breakdown (агрегат; уровень позиций доступен только в горячем окне)
   const child = reportChild(scope);
-  const groupedAt = (date: string) => {
-    const rows = D().prepare(
-      `SELECT ${child!.col} AS k, SUM(f.money) money, SUM(f.kg) kg
-       FROM fact f JOIN position p ON p.position_id=f.position_id
-       WHERE f.date=@date AND ${clause} GROUP BY k`,
-    ).all({ date, ...bind }) as any[];
-    return new Map<string, KM>(rows.map((r) => [String(r.k), { money: r.money, kg: r.kg }]));
-  };
+  const groupedAt = (date: string) => childBreakdownAt(date, scope);
   const cCur = groupedAt(target);
   const cPrev = prev ? groupedAt(prev) : new Map<string, KM>();
   const cAvgAcc = new Map<string, KM>();
@@ -293,14 +275,20 @@ export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?
     });
 
   // full history for this scope (all points of the chosen granularity)
+  const hist = new Map(seriesFor(scope).map((r) => [r.date, r]));
   const history = dateList.map((date) => {
-    const t = totalAt(date);
-    return { date, month: weekly ? undefined : months.find((m) => m.date === date)?.month, money: round(t.money), kg: round(t.kg, 1) };
+    const t = hist.get(date) ?? { money: 0, kg: 0 };
+    return {
+      date,
+      month: weekly ? undefined : months.find((m) => m.date === date)?.month,
+      money: round(t.money),
+      kg: round(t.kg, 1),
+    };
   });
 
   // movers within scope (positions), target vs prev
   let movers: any = { grew: [], fell: [] };
-  if (prev) {
+  if (prev && hasDetail(target) && hasDetail(prev)) {
     const rows = D().prepare(
       `SELECT p.name, p.tip, p.vid,
               c.money curMoney, c.kg curKg, COALESCE(pr.money,0) prevMoney, COALESCE(pr.kg,0) prevKg,
@@ -506,13 +494,19 @@ export function competitive(p: CompetitiveParams) {
     series[val] = rows.map((r) => ({ date: r.date, money: round(r.money), kg: round(r.kg, 1) }));
   }
 
-  const scopeHist = D()
-    .prepare(
-      `SELECT f.date, SUM(f.money) money, SUM(f.kg) kg
-       FROM fact f JOIN position p ON p.position_id = f.position_id
-       WHERE ${clause} GROUP BY f.date ORDER BY f.date`,
-    )
-    .all(bind) as any[];
+  // Линия самого среза берётся из агрегата — она есть на всю глубину истории.
+  // Разложение по менеджерам/заказчикам (series выше) требует детали и потому
+  // ограничено горячим окном.
+  const scopeHist =
+    p.type === "position"
+      ? (D()
+          .prepare(
+            `SELECT f.date, SUM(f.money) money, SUM(f.kg) kg
+             FROM fact f JOIN position p ON p.position_id = f.position_id
+             WHERE ${clause} GROUP BY f.date ORDER BY f.date`,
+          )
+          .all(bind) as any[])
+      : seriesFor({ tip: p.tip, vid: p.vid, grp: p.grp });
 
   return {
     dim: p.dim,

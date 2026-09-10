@@ -240,6 +240,105 @@ export interface LicenseState {
   lastCheck: number | null;
 }
 
+
+// ---- источник 1С ----
+export interface ScheduleState {
+  enabled: boolean;
+  hour: number;
+  mode: "compare" | "import";
+  lastRunDate: string | null;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  nextRunAt: string | null;
+  running: boolean;
+}
+export interface SourceConfig {
+  url: string;
+  login: string;
+  passwordSet: boolean;
+  enabled: boolean;
+  mode: "compare" | "import";
+  hour: number;
+  timeoutSec: number;
+  retentionDays: number;
+  schedule: ScheduleState;
+  exampleUrl: string;
+}
+export interface SyncLogRow {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  trigger: string;
+  mode: string;
+  ask_date: string | null;
+  url: string | null;
+  http_status: number | null;
+  duration_ms: number | null;
+  status: "ok" | "diff" | "imported" | "error";
+  rows: number | null;
+  positions: number | null;
+  new_positions: number | null;
+  gone_positions: number | null;
+  changed_positions: number | null;
+  src_kg: number | null;
+  src_money: number | null;
+  db_kg: number | null;
+  db_money: number | null;
+  message: string | null;
+  sample: string | null;
+}
+export interface SyncResult {
+  id: number;
+  status: "ok" | "diff" | "imported" | "error";
+  askDate: string;
+  snapshotDate: string | null;
+  url: string;
+  httpStatus: number;
+  durationMs: number;
+  rows: number;
+  positions: number;
+  newPositions: string[];
+  gonePositions: string[];
+  changedPositions: number;
+  src: { kg: number; money: number };
+  dbBefore: { kg: number; money: number };
+  message: string;
+  sample: string;
+  diag?: { format: string; mappedColumns: Record<string, string>; unmapped: string[]; skipped: number };
+}
+export interface SourceProbe {
+  url: string;
+  ok: boolean;
+  httpStatus: number;
+  contentType: string;
+  bytes: number;
+  durationMs: number;
+  error: string | null;
+  bodyHead: string;
+  parsed: { snapshotDate: string; rows: number; diag: any; firstRows: any[] } | null;
+  parseError: string | null;
+}
+export interface StorageStats {
+  factRows: number;
+  aggRows: number;
+  batchRows: number;
+  positions: number;
+  detailDates: number;
+  aggDates: number;
+  currentDate: string;
+  firstDate: string | null;
+  lastDate: string | null;
+  months: number;
+  dbBytes: number;
+  retentionDays: number;
+}
+export interface BackfillResult {
+  requested: string[];
+  loaded: string[];
+  failed: { date: string; error: string }[];
+  skipped: string[];
+}
+
 export const api = {
   licenseStatus: () => req<LicenseState>("/api/license/status"),
 
@@ -318,4 +417,27 @@ export const api = {
   general: () => req<GeneralSettings>("/api/settings/general"),
   saveGeneral: (b: Partial<{ currency: string; expiryWarnDays: number; password: string }>) =>
     req<{ ok: boolean }>("/api/settings/general", { method: "PUT", body: JSON.stringify(b) }),
+
+  // источник 1С
+  sourceConfig: () => req<SourceConfig>("/api/source/config"),
+  saveSourceConfig: (b: Partial<Omit<SourceConfig, "schedule" | "exampleUrl" | "passwordSet">> & { password?: string | null }) =>
+    req<{ ok: boolean; exampleUrl: string; schedule: ScheduleState }>("/api/source/config", {
+      method: "PUT",
+      body: JSON.stringify(b),
+    }),
+  sourceCheck: (b: { date?: string; mode?: "compare" | "import" } = {}) =>
+    req<SyncResult>("/api/source/check", { method: "POST", body: JSON.stringify(b) }),
+  sourceProbe: (date?: string) =>
+    req<SourceProbe>("/api/source/probe" + (date ? "?date=" + date : "")),
+  sourceLog: (limit = 50) => req<SyncLogRow[]>("/api/source/log?limit=" + limit),
+
+  // хранение истории
+  storageStats: () => req<StorageStats>("/api/storage/stats"),
+  storageCompact: (retentionDays?: number) =>
+    req<{ ok: boolean; cutoff: string; aggregated: string[]; factRowsDeleted: number; batchRowsDeleted: number; stats: StorageStats }>(
+      "/api/storage/compact",
+      { method: "POST", body: JSON.stringify({ retentionDays }) },
+    ),
+  storageBackfill: (b: { from: string; to: string; step?: "day" | "week" | "month"; maxPoints?: number }) =>
+    req<BackfillResult>("/api/storage/backfill", { method: "POST", body: JSON.stringify(b) }),
 };

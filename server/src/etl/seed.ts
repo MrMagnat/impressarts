@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { db, initSchema, DATA_DIR, setSetting } from "../db.js";
 import { importExcel } from "./import-excel.js";
 import { ingestSnapshot, modelHistory } from "./ingest.js";
+import { writeAggregateAll } from "../history.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,7 +20,7 @@ async function main() {
   initSchema();
 
   // чистый пере-сид
-  for (const t of ["batch", "fact", "position_dim", "position", "snapshot"]) {
+  for (const t of ["batch", "fact", "fact_agg", "position_dim", "position", "snapshot"]) {
     db().exec(`DELETE FROM ${t}`);
   }
 
@@ -34,6 +35,9 @@ async function main() {
   console.log("→ Моделирование истории (78 недель назад)…");
   const weeks = modelHistory(78);
   console.log(`   сгенерировано недель: ${weeks}`);
+
+  console.log("→ Сборка агрегата по датам…");
+  console.log(`   строк агрегата: ${writeAggregateAll()}`);
 
   setSetting("currency", "₽");
   setSetting("expiry_warn_days", "60");

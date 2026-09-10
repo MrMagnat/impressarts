@@ -30,6 +30,23 @@ import {
 import { importExcel } from "./etl/import-excel.js";
 import { ingestSnapshot } from "./etl/ingest.js";
 import { startLicense, licenseStatus, isLocked } from "./license.js";
+import { sourceConfig, saveSourceConfig, fetchSource, parseSource, buildUrl } from "./source.js";
+import {
+  runSync,
+  recentLog,
+  logEntry,
+  scheduleState,
+  startSync,
+  backfillRange,
+  today,
+} from "./sync.js";
+import {
+  writeAggregate,
+  writeAggregateAll,
+  repriceAggregate,
+  trimDetail,
+  storageStats,
+} from "./history.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST = path.resolve(__dirname, "../../web/dist");
@@ -38,6 +55,16 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 
 initSchema();
 ensurePassword();
+
+// Разовая досборка агрегата для баз, созданных до его появления.
+{
+  const aggEmpty = !(db().prepare("SELECT 1 AS x FROM fact_agg LIMIT 1").get() as any);
+  const hasFacts = !!(db().prepare("SELECT 1 AS x FROM fact LIMIT 1").get() as any);
+  if (aggEmpty && hasFacts) {
+    const n = writeAggregateAll();
+    console.log(`[storage] собран агрегат истории: ${n} строк`);
+  }
+}
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
 
@@ -233,6 +260,7 @@ const api = async (app: any) => {
         updPrice.run(price, it.vid);
         updFact.run(price, it.vid);
         updBatch.run(price, price, it.vid);
+        repriceAggregate(it.vid, price);
       }
       d.exec("COMMIT");
     } catch (e) {
@@ -262,6 +290,121 @@ const api = async (app: any) => {
     return { ok: true };
   });
 
+  // ---------- ИСТОЧНИК 1С ----------
+
+  app.get("/source/config", async () => {
+    const c = sourceConfig();
+    return {
+      url: c.url,
+      login: c.login,
+      passwordSet: c.password.length > 0,
+      enabled: c.enabled,
+      mode: c.mode,
+      hour: c.hour,
+      timeoutSec: c.timeoutSec,
+      retentionDays: c.retentionDays,
+      schedule: scheduleState(),
+      exampleUrl: buildUrl(c.url, today()),
+    };
+  });
+
+  app.put("/source/config", async (req: any) => {
+    const b = req.body ?? {};
+    saveSourceConfig({
+      url: b.url,
+      login: b.login,
+      // пустая строка = «не менять», null = «стереть»
+      password: b.password === undefined ? undefined : b.password === null ? "" : b.password,
+      enabled: b.enabled,
+      mode: b.mode,
+      hour: b.hour,
+      timeoutSec: b.timeoutSec,
+      retentionDays: b.retentionDays,
+    });
+    const c = sourceConfig();
+    return { ok: true, exampleUrl: buildUrl(c.url, today()), schedule: scheduleState() };
+  });
+
+  /** Ручной прогон: та же логика, что у ежедневного расписания. */
+  app.post("/source/check", async (req: any) => {
+    const b = req.body ?? {};
+    return runSync({
+      date: b.date || undefined,
+      mode: b.mode === "compare" || b.mode === "import" ? b.mode : undefined,
+      trigger: "manual",
+    });
+  });
+
+  /**
+   * Сырой ответ источника без разбора и без записи — для диагностики формата.
+   * Тело обрезается, чтобы не тащить в браузер многомегабайтную выгрузку.
+   */
+  app.get("/source/probe", async (req: any) => {
+    const date = (req.query.date as string) || today();
+    const limit = Math.min(parseInt((req.query.limit as string) ?? "8000", 10) || 8000, 200000);
+    const r = await fetchSource(date, sourceConfig());
+    let parsed: any = null;
+    let parseError: string | null = null;
+    if (r.ok && r.bytes > 0) {
+      try {
+        const p = await parseSource(r.body, r.contentType, date);
+        parsed = {
+          snapshotDate: p.snapshotDate,
+          rows: p.rows.length,
+          diag: p.diag,
+          firstRows: p.rows.slice(0, 3),
+        };
+      } catch (e: any) {
+        parseError = e?.message ?? String(e);
+      }
+    }
+    return {
+      url: r.url,
+      ok: r.ok,
+      httpStatus: r.httpStatus,
+      contentType: r.contentType,
+      bytes: r.bytes,
+      durationMs: r.durationMs,
+      error: r.error ?? null,
+      bodyHead: r.body.length ? r.sample.slice(0, limit) : "",
+      parsed,
+      parseError,
+    };
+  });
+
+  app.get("/source/log", async (req: any) =>
+    recentLog(parseInt((req.query.limit as string) ?? "50", 10) || 50),
+  );
+  app.get("/source/log/:id", async (req: any, reply: any) => {
+    const e = logEntry(parseInt(req.params.id, 10));
+    if (!e) return reply.code(404).send({ error: "Запись журнала не найдена" });
+    return e;
+  });
+
+  // ---------- ХРАНЕНИЕ И ГЛУБИНА ИСТОРИИ ----------
+
+  app.get("/storage/stats", async () => ({
+    ...storageStats(),
+    retentionDays: sourceConfig().retentionDays,
+  }));
+
+  /** Сжать старую детализацию в агрегат прямо сейчас. */
+  app.post("/storage/compact", async (req: any) => {
+    const days = parseInt(req.body?.retentionDays ?? "", 10);
+    const r = trimDetail(Number.isFinite(days) ? days : sourceConfig().retentionDays);
+    db().exec("VACUUM");
+    return { ok: true, ...r, stats: storageStats() };
+  });
+
+  /** Догрузить точки истории из 1С (сохраняются агрегатом, без детализации). */
+  app.post("/storage/backfill", async (req: any, reply: any) => {
+    const b = req.body ?? {};
+    if (!b.from || !b.to) return reply.code(400).send({ error: "Укажите период from и to" });
+    const step = b.step === "day" || b.step === "week" ? b.step : "month";
+    const max = Math.min(parseInt(b.maxPoints ?? "24", 10) || 24, 120);
+    return backfillRange(String(b.from), String(b.to), step, max);
+  });
+
   app.post("/settings/import", async (req: any, reply: any) => {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: "Файл не получен" });
@@ -271,7 +414,15 @@ const api = async (app: any) => {
     try {
       const res = await importExcel(dest);
       const ing = ingestSnapshot(res);
-      return { ok: true, date: ing.date, positions: ing.positions, rows: res.rows.length };
+      writeAggregate(ing.date);
+      const trimmed = trimDetail(sourceConfig().retentionDays);
+      return {
+        ok: true,
+        date: ing.date,
+        positions: ing.positions,
+        rows: res.rows.length,
+        compacted: trimmed.aggregated.length,
+      };
     } catch (e: any) {
       return reply.code(400).send({ error: e?.message ?? "Ошибка импорта" });
     }
@@ -298,6 +449,7 @@ if (fs.existsSync(WEB_DIST)) {
 }
 
 await startLicense((m) => app.log.info(m));
+startSync((m) => app.log.info(m));
 
 app
   .listen({ port: PORT, host: HOST })

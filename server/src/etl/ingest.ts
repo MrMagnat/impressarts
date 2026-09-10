@@ -50,8 +50,9 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
     d.prepare("DELETE FROM batch WHERE date = ?").run(snapshotDate);
     d.prepare("DELETE FROM fact  WHERE date = ?").run(snapshotDate);
     d.prepare(
-      "INSERT INTO snapshot(date, kind, created_at, note) VALUES(?, 'real', ?, ?) " +
-        "ON CONFLICT(date) DO UPDATE SET kind='real', created_at=excluded.created_at",
+      "INSERT INTO snapshot(date, kind, created_at, note, grain, source, detail) " +
+        "VALUES(?, 'real', ?, ?, 'day', 'excel', 1) " +
+        "ON CONFLICT(date) DO UPDATE SET kind='real', created_at=excluded.created_at, detail=1",
     ).run(snapshotDate, NOW_ISO, `Импорт: ${rows.length} строк`);
 
     const insPos = d.prepare(
@@ -119,7 +120,11 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
     }
 
     posCount = posKg.size;
-    setSetting("current_date", snapshotDate);
+    // при догрузке прошлой даты «текущий день» не должен уезжать назад
+    const maxReal = (d.prepare("SELECT MAX(date) AS m FROM snapshot WHERE kind='real'").get() as {
+      m: string | null;
+    }).m;
+    if (!maxReal || snapshotDate >= maxReal) setSetting("current_date", snapshotDate);
     tx("COMMIT");
   } catch (e) {
     tx("ROLLBACK");
@@ -173,7 +178,8 @@ export function modelHistory(weeks = 78): number {
   d.exec("DELETE FROM snapshot WHERE kind='modeled'");
 
   const insSnap = d.prepare(
-    "INSERT OR REPLACE INTO snapshot(date, kind, created_at, note) VALUES(?, 'modeled', ?, ?)",
+    "INSERT OR REPLACE INTO snapshot(date, kind, created_at, note, grain, source, detail) " +
+      "VALUES(?, 'modeled', ?, ?, 'week', 'model', 1)",
   );
   const insFact = d.prepare("INSERT OR REPLACE INTO fact(date, position_id, kg, money) VALUES(?,?,?,?)");
 

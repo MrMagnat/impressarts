@@ -88,7 +88,67 @@ export function initSchema(): void {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    -- Компактный агрегат по дате: покрывает тренды и отчёты, когда детальный
+    -- fact за эту дату уже вытеснен из горячего окна (история живёт в 1С).
+    -- ~500 строк на дату против ~3000 в fact.
+    CREATE TABLE IF NOT EXISTS fact_agg (
+      date      TEXT NOT NULL,
+      level     TEXT NOT NULL,            -- 'total' | 'tip' | 'vid' | 'grp'
+      k1        TEXT NOT NULL DEFAULT '', -- тип
+      k2        TEXT NOT NULL DEFAULT '', -- вид
+      k3        TEXT NOT NULL DEFAULT '', -- группа
+      kg        REAL NOT NULL,
+      money     REAL NOT NULL,
+      positions INTEGER NOT NULL,
+      PRIMARY KEY (date, level, k1, k2, k3)
+    );
+    CREATE INDEX IF NOT EXISTS ix_agg_level ON fact_agg(level, date);
+
+    -- Журнал обращений к источнику 1С.
+    CREATE TABLE IF NOT EXISTS sync_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at    TEXT NOT NULL,        -- ISO, реальное время
+      finished_at   TEXT,
+      trigger       TEXT NOT NULL,        -- 'schedule' | 'manual' | 'backfill'
+      mode          TEXT NOT NULL,        -- 'compare' | 'import'
+      ask_date      TEXT,                 -- дата, запрошенная у 1С (YYYY-MM-DD)
+      url           TEXT,
+      http_status   INTEGER,
+      duration_ms   INTEGER,
+      status        TEXT NOT NULL,        -- 'ok' | 'diff' | 'imported' | 'error'
+      rows          INTEGER,
+      positions     INTEGER,
+      new_positions INTEGER,
+      gone_positions INTEGER,
+      changed_positions INTEGER,
+      src_kg        REAL,
+      src_money     REAL,
+      db_kg         REAL,
+      db_money      REAL,
+      message       TEXT,
+      sample        TEXT                  -- начало сырого ответа, для диагностики
+    );
+    CREATE INDEX IF NOT EXISTS ix_synclog_at ON sync_log(started_at DESC);
   `);
+
+  // --- миграции существующих БД (идемпотентно) ---
+  for (const sql of [
+    "ALTER TABLE snapshot ADD COLUMN grain TEXT", // 'day' | 'week' | 'month'
+    "ALTER TABLE snapshot ADD COLUMN source TEXT", // 'excel' | '1c' | 'model'
+    "ALTER TABLE snapshot ADD COLUMN detail INTEGER", // 1 = есть детальный fact
+  ]) {
+    try {
+      d.exec(sql);
+    } catch {
+      /* колонка уже есть */
+    }
+  }
+  d.exec(
+    "UPDATE snapshot SET grain = COALESCE(grain, 'week'), " +
+      "source = COALESCE(source, CASE kind WHEN 'modeled' THEN 'model' ELSE 'excel' END), " +
+      "detail = COALESCE(detail, 1)",
+  );
 }
 
 export function getSetting(key: string, fallback = ""): string {

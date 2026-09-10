@@ -18,7 +18,7 @@ export interface ImportResult {
   rows: RawRow[];
 }
 
-function text(v: unknown): string {
+export function text(v: unknown): string {
   if (v == null) return "";
   if (typeof v === "string") return v.trim();
   if (typeof v === "number") return String(v);
@@ -33,7 +33,7 @@ function text(v: unknown): string {
   return String(v).trim();
 }
 
-function num(v: unknown): number {
+export function num(v: unknown): number {
   if (typeof v === "number") return v;
   const s = text(v).replace(/\s/g, "").replace(",", ".");
   const n = parseFloat(s);
@@ -42,7 +42,7 @@ function num(v: unknown): number {
 
 /** Parse a date cell → YYYY-MM-DD or null. Accepts Date, "dd.mm.yyyy[ hh:mm:ss]", "dd.mm.yy". */
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
-function dateCell(v: unknown): string | null {
+export function dateCell(v: unknown): string | null {
   if (v == null || v === "") return null;
   if (v instanceof Date) return ymd(v);
   if (typeof v === "number" && v > 20000 && v < 80000) {

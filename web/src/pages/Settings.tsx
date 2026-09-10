@@ -1,22 +1,26 @@
 import React, { useEffect, useState } from "react";
 import { api, PriceRow } from "../api";
 import { Card, Loading, Spinner, useAsync } from "../ui";
+import SourceTab from "./SourceTab";
+import StorageTab from "./StorageTab";
 import { fmtDate, money, moneyFull, weight } from "../format";
 
 const TABS = [
+  { k: "source", label: "Источник 1С" },
   { k: "prices", label: "Цены (₽/кг)" },
-  { k: "import", label: "Импорт из 1С" },
+  { k: "import", label: "Импорт файлом" },
+  { k: "storage", label: "Хранение" },
   { k: "general", label: "Общие" },
 ] as const;
 type Tab = (typeof TABS)[number]["k"];
 
 export default function Settings() {
-  const [tab, setTab] = useState<Tab>("prices");
+  const [tab, setTab] = useState<Tab>("source");
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-bold">Настройки</h1>
-        <p className="text-ink-mut text-sm">Цены для расчёта «заморожено в деньгах», загрузка данных, параметры</p>
+        <p className="text-ink-mut text-sm">Подключение к 1С, цены для расчёта «заморожено в деньгах», глубина истории</p>
       </div>
       <div className="flex gap-1 border-b border-line">
         {TABS.map((t) => (
@@ -29,8 +33,10 @@ export default function Settings() {
           </button>
         ))}
       </div>
+      {tab === "source" && <SourceTab />}
       {tab === "prices" && <Prices />}
       {tab === "import" && <Import />}
+      {tab === "storage" && <StorageTab />}
       {tab === "general" && <General />}
     </div>
   );
@@ -175,8 +181,8 @@ function Import() {
         </div>
       </Card>
       <div className="text-xs text-ink-faint">
-        Автопроверка каждый день: настраивается на сервере (cron / планировщик) — кладите свежую выгрузку в
-        папку <code>data/uploads</code> или загружайте здесь.
+        Ручная загрузка — запасной путь. Штатно данные забираются из HTTP-сервиса 1С раз в сутки:
+        вкладка «Источник 1С».
       </div>
     </div>
   );

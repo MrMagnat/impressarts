@@ -1,16 +1,17 @@
 import { db, currentDate, getSetting } from "./db.js";
 import { round, monthKey } from "./util.js";
+import { seriesFor } from "./history.js";
 
 const D = () => db();
 
 export function snapshotDates(): string[] {
-  return (D().prepare("SELECT date FROM snapshot ORDER BY date").all() as { date: string }[]).map(
-    (r) => r.date,
-  );
+  return (
+    D().prepare("SELECT DISTINCT date FROM fact_agg ORDER BY date").all() as { date: string }[]
+  ).map((r) => r.date);
 }
 
 export function prevDate(date: string): string | null {
-  const r = D().prepare("SELECT MAX(date) AS d FROM snapshot WHERE date < ?").get(date) as {
+  const r = D().prepare("SELECT MAX(date) AS d FROM fact_agg WHERE date < ?").get(date) as {
     d: string | null;
   };
   return r.d;
@@ -20,7 +21,7 @@ export function prevDate(date: string): string | null {
 export function priorDates(date: string, n: number): string[] {
   return (
     D()
-      .prepare("SELECT date FROM snapshot WHERE date < ? ORDER BY date DESC LIMIT ?")
+      .prepare("SELECT DISTINCT date FROM fact_agg WHERE date < ? ORDER BY date DESC LIMIT ?")
       .all(date, n) as { date: string }[]
   ).map((r) => r.date);
 }
@@ -40,6 +41,11 @@ export function meta() {
         date: string;
       }[]
     ).map((r) => r.date),
+    // даты с полной детализацией (партии, менеджеры, топ-движения)
+    detailFrom:
+      (
+        D().prepare("SELECT MIN(date) AS d FROM fact").get() as { d: string | null }
+      ).d ?? null,
   };
 }
 
@@ -297,9 +303,16 @@ export function dashboard() {
   const priors = priorDates(cur, 4);
 
   const totalAt = (date: string) =>
-    D().prepare("SELECT COALESCE(SUM(kg),0) kg, COALESCE(SUM(money),0) money, COUNT(*) positions FROM fact WHERE date=?").get(
-      date,
-    ) as { kg: number; money: number; positions: number };
+    (D()
+      .prepare(
+        "SELECT COALESCE(kg,0) kg, COALESCE(money,0) money, COALESCE(positions,0) positions " +
+          "FROM fact_agg WHERE date=? AND level='total'",
+      )
+      .get(date) as { kg: number; money: number; positions: number } | undefined) ?? {
+      kg: 0,
+      money: 0,
+      positions: 0,
+    };
 
   const now = totalAt(cur);
   const prevT = prev ? totalAt(prev) : { kg: 0, money: 0, positions: 0 };
@@ -316,29 +329,22 @@ export function dashboard() {
 
   const byTip = D()
     .prepare(
-      `SELECT p.tip, SUM(f.kg) kg, SUM(f.money) money, COUNT(*) positions
-       FROM fact f JOIN position p ON p.position_id=f.position_id WHERE f.date=?
-       GROUP BY p.tip ORDER BY money DESC`,
+      `SELECT k1 AS tip, kg, money, positions FROM fact_agg
+       WHERE date=? AND level='tip' ORDER BY money DESC`,
     )
     .all(cur)
     .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
 
   const topVids = D()
     .prepare(
-      `SELECT p.tip, p.vid, SUM(f.kg) kg, SUM(f.money) money
-       FROM fact f JOIN position p ON p.position_id=f.position_id WHERE f.date=?
-       GROUP BY p.tip, p.vid ORDER BY money DESC LIMIT 10`,
+      `SELECT k1 AS tip, k2 AS vid, kg, money FROM fact_agg
+       WHERE date=? AND level='vid' ORDER BY money DESC LIMIT 10`,
     )
     .all(cur)
     .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
 
-  const trend = D()
-    .prepare(
-      `SELECT date, SUM(kg) kg, SUM(money) money FROM fact
-       WHERE date >= ? GROUP BY date ORDER BY date`,
-    )
-    .all(priorDates(cur, 26).slice(-1)[0] ?? cur)
-    .map((r: any) => ({ date: r.date, kg: round(r.kg, 1), money: round(r.money) }));
+  // тренд за 26 точек назад — из агрегата, поэтому не зависит от глубины детали
+  const trend = seriesFor({}, priorDates(cur, 26).slice(-1)[0] ?? cur);
 
   const topDim = (dim: string) =>
     D()
