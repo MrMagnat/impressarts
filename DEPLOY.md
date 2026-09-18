@@ -59,7 +59,9 @@ ssh-copy-id op@192.168.233.2
 ```bash
 SSH_HOST=op@192.168.233.2 ./ops/deploy.sh
 ```
-Скрипт скопирует проект в `/opt/impress-sklad` и выполнит `docker compose up -d --build`.
+Скрипт скопирует проект в `$REMOTE_DIR` (по умолчанию `/opt/impress-sklad`) и выполнит
+`docker compose up -d --build`. **На текущем сервере проект развёрнут в
+`/home/op/impressarts-main`** — при обновлении используйте этот путь.
 
 > На сервере нужны `docker` и `docker compose`. Если их нет:
 > `curl -fsSL https://get.docker.com | sh`

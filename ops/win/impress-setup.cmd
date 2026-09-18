@@ -14,7 +14,7 @@ rem ---------------------------------------------------------------------------
 set "ALIAS=impress"
 set "KEY=%USERPROFILE%\.ssh\id_ed25519_impress"
 set "CFG=%USERPROFILE%\.ssh\config"
-set "REMOTEDIR=/opt/impressarts-main"
+set "REMOTEDIR=/home/op/impressarts-main"
 
 echo.
 echo ==============================================
