@@ -14,9 +14,23 @@ import {
   positionCard,
   searchPositions,
   dashboard,
+  breakdown,
 } from "./analytics.js";
-import { weeklyReport, monthlyReport, monthEnds, competitive, scopeReport } from "./reports.js";
-import { reportHtml, scopeReportHtml, positionReportHtml } from "./report-html.js";
+import {
+  weeklyReport,
+  monthlyReport,
+  monthEnds,
+  competitive,
+  scopeReport,
+  expiryReport,
+  type ExpiryBucketKey,
+} from "./reports.js";
+import {
+  reportHtml,
+  scopeReportHtml,
+  positionReportHtml,
+  expiryReportHtml,
+} from "./report-html.js";
 import { htmlToPdf, PdfUnavailable } from "./pdf.js";
 import {
   checkPassword,
@@ -129,6 +143,12 @@ const api = async (app: any) => {
 
   app.get("/dashboard", async () => dashboard());
 
+  /** Текущие разрезы (сроки годности, менеджеры, заказчики) с фильтром по типу. */
+  app.get("/dashboard/breakdown", async (req: any) => {
+    const tip = (req.query.tip ?? "").toString().trim();
+    return breakdown(tip || undefined);
+  });
+
   // reports
   app.get("/reports/weeks", async () => {
     const dates = (db().prepare("SELECT date FROM snapshot ORDER BY date DESC").all() as {
@@ -149,6 +169,20 @@ const api = async (app: any) => {
       q.period,
     );
   });
+
+  const expiryParams = (q: Record<string, string>) => {
+    const within = parseInt(q.withinDays ?? "", 10);
+    return {
+      tip: q.tip || undefined,
+      bucket: (q.bucket as ExpiryBucketKey) || undefined,
+      withinDays: Number.isFinite(within) ? within : undefined,
+      limit: parseInt(q.limit ?? "", 10) || undefined,
+    };
+  };
+
+  app.get("/reports/expiry", async (req: any) =>
+    expiryReport(expiryParams(req.query as Record<string, string>)),
+  );
 
   app.get("/reports/competitive", async (req: any) => {
     const q = req.query as Record<string, string>;
@@ -211,6 +245,11 @@ const api = async (app: any) => {
     const q = req.query as Record<string, string>;
     const html = scopeReportHtml({ tip: q.tip, vid: q.vid, grp: q.grp });
     await sendHtmlOrPdf(reply, html, `scope-${q.grp ?? q.vid ?? q.tip ?? "all"}`);
+  });
+  app.get("/reports/expiry.pdf", async (req: any, reply: any) => {
+    const q = req.query as Record<string, string>;
+    const html = expiryReportHtml(expiryParams(q));
+    await sendHtmlOrPdf(reply, html, `expiry-${q.tip ?? "all"}-${q.bucket ?? "all"}`);
   });
   app.get("/reports/position.pdf", async (req: any, reply: any) => {
     const id = (req.query as any).id as string;

@@ -1,4 +1,12 @@
-import { weeklyReport, monthlyReport, competitive, type CompetitiveParams } from "./reports.js";
+import {
+  weeklyReport,
+  monthlyReport,
+  competitive,
+  expiryReport,
+  EXPIRY_LABELS,
+  type CompetitiveParams,
+  type ExpiryParams,
+} from "./reports.js";
 import { positionCard } from "./analytics.js";
 import { getSetting } from "./db.js";
 
@@ -260,4 +268,76 @@ export function positionReportHtml(id: string): string {
   <tbody>${batchRows}</tbody></table>
   `;
   return pageWrap(c.name, `${c.tip} · ${c.vid} · ${c.grp}`, body);
+}
+
+/** Печатная версия отчёта по срокам годности с детализацией по номенклатуре. */
+export function expiryReportHtml(params: ExpiryParams = {}): string {
+  const r = expiryReport({ ...params, limit: params.limit ?? 400 });
+
+  const bucketRows = r.buckets
+    .filter((b) => b.batches > 0)
+    .map(
+      (b) =>
+        `<tr${b.bucket === "overdue" ? ' class="down"' : ""}><td>${esc(b.label)}</td>
+         <td>${fmtKg(b.kg)}</td><td>${fmtMoney(b.money)}</td><td>${b.batches}</td></tr>`,
+    )
+    .join("");
+
+  const daysCell = (d: number | null) =>
+    d == null
+      ? '<td class="mut">—</td>'
+      : d < 0
+        ? `<td class="down">просрочено ${-d}д</td>`
+        : `<td${d <= 30 ? ' class="down"' : ""}>${d}д</td>`;
+
+  const posRows = r.rows
+    .map((row) => {
+      const head =
+        `<tr class="lvl-tip"><td>${esc(row.name)}</td><td class="mut">${esc(row.tip)} · ${esc(
+          row.grp,
+        )}</td><td>${esc(row.nearest ?? "—")}</td>${daysCell(row.daysLeft)}
+         <td>${fmtKg(row.kg)}</td><td>${fmtMoney(row.money)}</td><td>${row.batches}</td></tr>`;
+      const items = row.items
+        .map(
+          (b) =>
+            `<tr><td class="mut">└ серия ${esc(b.series || "—")}</td>
+             <td class="mut">${esc(b.manager ?? "—")} / ${esc(b.counterparty ?? "—")}</td>
+             <td>${esc(b.bestBefore ?? "—")}</td>${daysCell(b.daysLeft)}
+             <td>${fmtKg(b.kg)}</td><td>${fmtMoney(b.money)}</td><td></td></tr>`,
+        )
+        .join("");
+      return head + items;
+    })
+    .join("");
+
+  const f = r.filter;
+  const filters = [
+    f.tip ? `тип: ${f.tip}` : "все типы",
+    f.bucket ? `срок: ${EXPIRY_LABELS[f.bucket]}` : null,
+    f.withinDays != null ? `истекает в ближайшие ${f.withinDays} дн.` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const body = `
+  <div class="kpis">
+    <div class="kpi"><div class="l">Позиций в отчёте</div><div class="v">${r.totals.positions}</div>
+      <div class="d mut">партий ${r.totals.batches}</div></div>
+    <div class="kpi"><div class="l">Остаток</div><div class="v">${fmtKg(r.totals.kg)}</div></div>
+    <div class="kpi"><div class="l">Заморожено</div><div class="v">${fmtMoney(r.totals.money)}</div></div>
+    <div class="kpi"><div class="l">Просрочено</div><div class="v ${
+      r.totals.overdueKg > 0 ? "down" : ""
+    }">${fmtKg(r.totals.overdueKg)}</div></div>
+  </div>
+
+  <h2>Сводка по срокам</h2>
+  <table><thead><tr><th>Группа</th><th>Остаток</th><th>Деньги</th><th>Партий</th></tr></thead>
+  <tbody>${bucketRows}</tbody></table>
+
+  <h2>Детализация по номенклатуре</h2>
+  <table><thead><tr><th>Номенклатура</th><th>Тип / группа</th><th>Годен до</th><th>Осталось</th>
+  <th>Остаток</th><th>Деньги</th><th>Партий</th></tr></thead><tbody>${posRows}</tbody></table>
+  ${r.truncated ? '<p class="mut">Список обрезан: показаны только первые позиции по срочности.</p>' : ""}
+  `;
+  return pageWrap("Сроки годности", `На ${r.date} · ${filters}`, body);
 }

@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { api } from "../api";
-import { Card, DeltaBadge, ErrorBox, Loading, useAsync } from "../ui";
-import { Donut, HBars, TrendArea } from "../components/charts";
+import { Link } from "react-router-dom";
+import { Card, DeltaBadge, ErrorBox, Loading, Spinner, useAsync } from "../ui";
+import { Donut, HBars, StackedTrend, TrendArea } from "../components/charts";
 import { fmtDate, fmtNum, money, moneyFull, PALETTE, pct, TIP_COLORS, weight } from "../format";
 
 function Stat({
@@ -42,6 +43,10 @@ const EXP_COLORS: Record<string, string> = {
 export default function Dashboard() {
   const { data, loading, error } = useAsync(() => api.dashboard(), []);
   const [metric, setMetric] = useState<"money" | "kg">("money");
+  const [stacked, setStacked] = useState(true);
+  // фильтр по типу для блоков, которые считаются по партиям текущего снимка
+  const [tipFilter, setTipFilter] = useState<string>("");
+  const bd = useAsync(() => api.breakdown(tipFilter || undefined), [tipFilter]);
 
   if (loading) return <Loading />;
   if (error) return <ErrorBox msg={error} />;
@@ -57,7 +62,10 @@ export default function Dashboard() {
     label: v.vid,
     value: metric === "money" ? v.money : v.kg,
   }));
-  const expiryActive = d.expiry.filter((b) => b.kg > 0);
+  // пока разрез не подгрузился, показываем общие цифры из дашборда
+  const cut = bd.data ?? { expiry: d.expiry, topManagers: d.topManagers, topCounterparties: d.topCounterparties };
+  const expiryActive = cut.expiry.filter((b) => b.kg > 0);
+  const tips = d.tips ?? d.byTip.map((t) => t.tip);
 
   return (
     <div className="space-y-5">
@@ -106,8 +114,44 @@ export default function Dashboard() {
 
       {/* trend + donut */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <Card className="xl:col-span-2 p-4" title={`Динамика запасов · ${metric === "money" ? "деньги" : "тоннаж"}`} right={<span className="text-xs text-ink-faint">{d.trend.length} недель</span>}>
-          <TrendArea data={d.trend} metric={metric} height={260} color={metric === "money" ? "#f59c21" : "#123454"} />
+        <Card
+          className="xl:col-span-2 p-4"
+          title={`Динамика запасов · ${metric === "money" ? "деньги" : "тоннаж"}`}
+          right={
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-faint">{d.trend.length} точек</span>
+              <div className="flex gap-1 bg-bg rounded-lg border border-line p-0.5">
+                <button
+                  onClick={() => setStacked(true)}
+                  className={"px-2.5 py-1 rounded-md text-xs font-medium " + (stacked ? "bg-brand-500 text-white" : "text-ink-mut")}
+                >
+                  По типам
+                </button>
+                <button
+                  onClick={() => setStacked(false)}
+                  className={"px-2.5 py-1 rounded-md text-xs font-medium " + (!stacked ? "bg-brand-500 text-white" : "text-ink-mut")}
+                >
+                  Всего
+                </button>
+              </div>
+            </div>
+          }
+        >
+          {stacked && (d.trendByTip ?? []).length > 0 ? (
+            <>
+              <StackedTrend data={d.trendByTip} keys={tips} colors={TIP_COLORS} metric={metric} height={260} />
+              <div className="flex items-center gap-4 flex-wrap mt-2 pl-1">
+                {tips.map((t) => (
+                  <span key={t} className="flex items-center gap-1.5 text-xs text-ink-mut">
+                    <span className="w-2.5 h-2.5 rounded-sm" style={{ background: TIP_COLORS[t] ?? "#f59c21" }} />
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : (
+            <TrendArea data={d.trend} metric={metric} height={260} color={metric === "money" ? "#f59c21" : "#123454"} />
+          )}
         </Card>
         <Card className="p-4" title="Структура по типам">
           <Donut data={tipData} height={190} />
@@ -123,12 +167,24 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      {/* фильтр по типу для блоков, считаемых по партиям */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm text-ink-mut">Сроки годности, менеджеры и заказчики:</span>
+        <div className="flex gap-1 bg-white rounded-lg border border-line p-1 flex-wrap">
+          <TipChip label="Все типы" active={tipFilter === ""} onClick={() => setTipFilter("")} />
+          {tips.map((t) => (
+            <TipChip key={t} label={t} color={TIP_COLORS[t]} active={tipFilter === t} onClick={() => setTipFilter(t)} />
+          ))}
+        </div>
+        {bd.loading && <Spinner />}
+      </div>
+
       {/* vids + expiry */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <Card className="p-4" title="Топ категорий (вид номенклатуры)">
           <HBars data={vidData} metric={metric} height={260} />
         </Card>
-        <Card className="p-4" title="Сроки годности партий">
+        <Card className="p-4" title={"Сроки годности партий" + (tipFilter ? " · " + tipFilter : "")}>
           <div className="space-y-2.5 mt-1">
             {expiryActive.map((b) => {
               const maxKg = Math.max(...expiryActive.map((x) => x.kg));
@@ -148,9 +204,14 @@ export default function Dashboard() {
               );
             })}
           </div>
-          {d.expiry[0].kg > 0 && (
-            <div className="mt-3 text-sm bg-red-50 text-down rounded-lg px-3 py-2">
-              ⚠ Просрочено {weight(d.expiry[0].kg)} на {money(d.expiry[0].money)} — требует списания или переоценки.
+          {cut.expiry[0] && cut.expiry[0].kg > 0 && (
+            <div className="mt-3 text-sm bg-red-50 text-down rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+              <span>
+                ⚠ Просрочено {weight(cut.expiry[0].kg)} на {money(cut.expiry[0].money)} — требует списания или переоценки.
+              </span>
+              <Link to={"/expiry" + (tipFilter ? "?tip=" + encodeURIComponent(tipFilter) : "")} className="shrink-0 font-semibold underline">
+                Разбор
+              </Link>
             </div>
           )}
         </Card>
@@ -158,10 +219,43 @@ export default function Dashboard() {
 
       {/* managers + counterparties */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <DimTable title="Топ менеджеров (по партиям на складе)" rows={d.topManagers} metric={metric} />
-        <DimTable title="Топ заказчиков / поставщиков" rows={d.topCounterparties} metric={metric} />
+        <DimTable
+          title={"Топ менеджеров (по партиям на складе)" + (tipFilter ? " · " + tipFilter : "")}
+          rows={cut.topManagers}
+          metric={metric}
+        />
+        <DimTable
+          title={"Топ заказчиков / поставщиков" + (tipFilter ? " · " + tipFilter : "")}
+          rows={cut.topCounterparties}
+          metric={metric}
+        />
       </div>
     </div>
+  );
+}
+
+function TipChip({
+  label,
+  color,
+  active,
+  onClick,
+}: {
+  label: string;
+  color?: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={
+        "px-3 py-1 rounded-md text-sm font-medium transition flex items-center gap-1.5 " +
+        (active ? "bg-brand-500 text-white" : "text-ink-mut hover:bg-black/5")
+      }
+    >
+      {color && <span className="w-2 h-2 rounded-full" style={{ background: active ? "#fff" : color }} />}
+      {label}
+    </button>
   );
 }
 

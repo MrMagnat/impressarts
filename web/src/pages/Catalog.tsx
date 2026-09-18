@@ -18,6 +18,8 @@ const LEVEL_LABEL: Record<string, string> = {
   position: "Позиция",
 };
 
+// Иерархия каталога: Тип -> Группа -> Позиция -> Партии (в карточке позиции).
+
 export default function Catalog() {
   const [path, setPath] = useState<Path>({});
   const [openId, setOpenId] = useState<string | null>(null);
@@ -44,8 +46,7 @@ export default function Catalog() {
   const crumbs = useMemo(() => {
     const arr: { label: string; go: Path }[] = [{ label: "Все запасы", go: {} }];
     if (path.tip) arr.push({ label: path.tip, go: { tip: path.tip } });
-    if (path.vid) arr.push({ label: path.vid, go: { tip: path.tip, vid: path.vid } });
-    if (path.grp) arr.push({ label: path.grp, go: { ...path } });
+    if (path.grp) arr.push({ label: path.grp, go: { tip: path.tip, grp: path.grp } });
     return arr;
   }, [path]);
 
@@ -55,8 +56,7 @@ export default function Catalog() {
       return;
     }
     if (n.level === "tip") setPath({ tip: n.key });
-    else if (n.level === "vid") setPath({ tip: path.tip, vid: n.key });
-    else if (n.level === "grp") setPath({ tip: path.tip, vid: path.vid, grp: n.key });
+    else if (n.level === "grp") setPath({ tip: path.tip, grp: n.key });
   };
 
   const canCompete = !!path.tip; // competitive available once inside a type
@@ -66,7 +66,7 @@ export default function Catalog() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold">Каталог складских запасов</h1>
-          <p className="text-ink-mut text-sm">Дерево: тип → вид → группа → позиция → партии</p>
+          <p className="text-ink-mut text-sm">Дерево: тип → группа → позиция → партии</p>
         </div>
         <div className="relative">
           <input

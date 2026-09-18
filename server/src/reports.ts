@@ -1,6 +1,6 @@
 import { db, currentDate } from "./db.js";
 import { round, monthKey } from "./util.js";
-import { prevDate, priorDates } from "./analytics.js";
+import { prevDate, priorDates, expiryBuckets } from "./analytics.js";
 import {
   aggAt,
   totalAt as aggTotalAt,
@@ -187,10 +187,9 @@ export interface ScopeSel {
   grp?: string;
 }
 
-/** Child grouping column + level for a scope in the tree Тип→Вид→Группа→Позиция. */
+/** Child grouping column + level for a scope in the tree Тип→Группа→Позиция. */
 function reportChild(s: ScopeSel): { col: string; level: string; label: string } | null {
   if (!s.tip) return { col: "p.tip", level: "tip", label: "Тип номенклатуры" };
-  if (!s.vid) return { col: "p.vid", level: "vid", label: "Вид номенклатуры" };
   if (!s.grp) return { col: "p.grp", level: "grp", label: "Группа" };
   return { col: "p.name", level: "position", label: "Позиция" };
 }
@@ -328,6 +327,162 @@ export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?
     history,
     movers,
   };
+}
+
+// ---------- ОТЧЁТ ПО СРОКАМ ГОДНОСТИ ----------
+
+export type ExpiryBucketKey = "overdue" | "d30" | "d60" | "d90" | "ok" | "no_date";
+
+export interface ExpiryParams {
+  tip?: string;
+  bucket?: ExpiryBucketKey;
+  /** Показывать только партии, у которых срок истекает не позже чем через N дней. */
+  withinDays?: number;
+  limit?: number;
+}
+
+/**
+ * Детализация сроков годности по номенклатуре: партии текущего снимка,
+ * сгруппированные в позиции, отсортированные по сроку «кто горит первым».
+ *
+ * Считается по таблице партий — она хранится только за текущий снимок,
+ * поэтому отчёт всегда про «сейчас на складе».
+ */
+export function expiryReport(p: ExpiryParams = {}) {
+  const cur = currentDate();
+  const limit = Math.min(Math.max(p.limit ?? 300, 1), 2000);
+
+  const where: string[] = ["b.date = @cur"];
+  const bind: Record<string, any> = { cur, limit };
+  if (p.tip) {
+    where.push("pos.tip = @tip");
+    bind.tip = p.tip;
+  }
+  if (p.bucket) {
+    where.push(BUCKET_SQL[p.bucket]);
+  }
+  if (p.withinDays != null && Number.isFinite(p.withinDays)) {
+    where.push(
+      "b.best_before IS NOT NULL AND julianday(b.best_before) - julianday(@cur) <= @within",
+    );
+    bind.within = p.withinDays;
+  }
+  const clause = where.join(" AND ");
+
+  const positions = D()
+    .prepare(
+      `SELECT pos.position_id AS id, pos.name, pos.tip, pos.vid, pos.grp,
+              SUM(b.kg) kg, SUM(b.money) money, COUNT(*) batches,
+              MIN(b.best_before) AS nearest,
+              CAST(MIN(julianday(b.best_before)) - julianday(@cur) AS INTEGER) AS daysLeft,
+              SUM(CASE WHEN b.best_before IS NOT NULL AND b.best_before < @cur THEN b.kg ELSE 0 END) overdueKg,
+              SUM(CASE WHEN b.best_before IS NULL THEN b.kg ELSE 0 END) noDateKg
+       FROM batch b JOIN position pos ON pos.position_id = b.position_id
+       WHERE ${clause}
+       GROUP BY pos.position_id
+       ORDER BY (MIN(b.best_before) IS NULL), MIN(b.best_before) ASC, money DESC
+       LIMIT @limit`,
+    )
+    .all(bind) as any[];
+
+  const ids = positions.map((r) => r.id);
+  const byPosition = new Map<string, any[]>();
+  if (ids.length) {
+    const ph = ids.map(() => "?").join(",");
+    for (const b of D()
+      .prepare(
+        `SELECT position_id, series, kg, money, best_before, manufactured, manager, counterparty,
+                CAST(julianday(best_before) - julianday(?) AS INTEGER) AS daysLeft
+         FROM batch WHERE date = ? AND position_id IN (${ph})
+         ORDER BY (best_before IS NULL), best_before ASC`,
+      )
+      .all(cur, cur, ...ids) as any[]) {
+      const arr = byPosition.get(b.position_id) ?? [];
+      arr.push({
+        series: b.series,
+        kg: round(b.kg, 3),
+        money: round(b.money),
+        bestBefore: b.best_before,
+        manufactured: b.manufactured,
+        manager: b.manager,
+        counterparty: b.counterparty,
+        daysLeft: b.best_before ? b.daysLeft : null,
+        bucket: bucketOf(b.best_before, b.daysLeft),
+      });
+      byPosition.set(b.position_id, arr);
+    }
+  }
+
+  const totals = positions.reduce(
+    (a, r) => ({
+      kg: a.kg + r.kg,
+      money: a.money + r.money,
+      batches: a.batches + r.batches,
+      overdueKg: a.overdueKg + r.overdueKg,
+    }),
+    { kg: 0, money: 0, batches: 0, overdueKg: 0 },
+  );
+
+  return {
+    date: cur,
+    filter: { tip: p.tip ?? null, bucket: p.bucket ?? null, withinDays: p.withinDays ?? null },
+    buckets: expiryBuckets(p.tip ? { tip: p.tip } : {}),
+    tips: (
+      D().prepare("SELECT DISTINCT tip FROM position ORDER BY tip").all() as { tip: string }[]
+    ).map((r) => r.tip),
+    totals: {
+      positions: positions.length,
+      kg: round(totals.kg, 1),
+      money: round(totals.money),
+      batches: totals.batches,
+      overdueKg: round(totals.overdueKg, 1),
+    },
+    truncated: positions.length >= limit,
+    rows: positions.map((r) => ({
+      id: r.id,
+      name: r.name,
+      tip: r.tip,
+      vid: r.vid,
+      grp: r.grp,
+      kg: round(r.kg, 1),
+      money: round(r.money),
+      batches: r.batches,
+      nearest: r.nearest,
+      daysLeft: r.nearest ? r.daysLeft : null,
+      bucket: bucketOf(r.nearest, r.daysLeft),
+      overdueKg: round(r.overdueKg, 1),
+      noDateKg: round(r.noDateKg, 1),
+      items: byPosition.get(r.id) ?? [],
+    })),
+  };
+}
+
+const BUCKET_SQL: Record<ExpiryBucketKey, string> = {
+  overdue: "b.best_before IS NOT NULL AND b.best_before < @cur",
+  d30: "b.best_before IS NOT NULL AND b.best_before >= @cur AND julianday(b.best_before)-julianday(@cur) <= 30",
+  d60: "b.best_before IS NOT NULL AND julianday(b.best_before)-julianday(@cur) > 30 AND julianday(b.best_before)-julianday(@cur) <= 60",
+  d90: "b.best_before IS NOT NULL AND julianday(b.best_before)-julianday(@cur) > 60 AND julianday(b.best_before)-julianday(@cur) <= 90",
+  ok: "b.best_before IS NOT NULL AND julianday(b.best_before)-julianday(@cur) > 90",
+  no_date: "b.best_before IS NULL",
+};
+
+export const EXPIRY_LABELS: Record<ExpiryBucketKey, string> = {
+  overdue: "Просрочено",
+  d30: "≤ 30 дней",
+  d60: "31–60 дней",
+  d90: "61–90 дней",
+  ok: "> 90 дней",
+  no_date: "Без срока",
+};
+
+function bucketOf(bestBefore: string | null, daysLeft: number | null): ExpiryBucketKey {
+  if (!bestBefore) return "no_date";
+  const d = daysLeft ?? 0;
+  if (d < 0) return "overdue";
+  if (d <= 30) return "d30";
+  if (d <= 60) return "d60";
+  if (d <= 90) return "d90";
+  return "ok";
 }
 
 // ---------- COMPETITIVE ----------

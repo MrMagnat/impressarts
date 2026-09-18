@@ -29,19 +29,18 @@ export default function Reports() {
       ? (weeks.data ?? []).map((d) => ({ value: d, label: "Неделя от " + fmtDate(d) }))
       : (months.data ?? []).map((m) => ({ value: m.month, label: m.month }));
 
+  // Иерархия отчётов повторяет каталог: Тип -> Группа -> Позиция.
   const crumbs = useMemo(() => {
     const arr: { label: string; go: Scope }[] = [{ label: "Все данные", go: {} }];
     if (scope.tip) arr.push({ label: scope.tip, go: { tip: scope.tip } });
-    if (scope.vid) arr.push({ label: scope.vid, go: { tip: scope.tip, vid: scope.vid } });
-    if (scope.grp) arr.push({ label: scope.grp, go: { ...scope } });
+    if (scope.grp) arr.push({ label: scope.grp, go: { tip: scope.tip, grp: scope.grp } });
     return arr;
   }, [scope]);
 
   const drill = (c: ScopeChild) => {
     if (!c.hasChildren) return;
     if (!scope.tip) setScope({ tip: c.key });
-    else if (!scope.vid) setScope({ tip: scope.tip, vid: c.key });
-    else if (!scope.grp) setScope({ tip: scope.tip, vid: scope.vid, grp: c.key });
+    else if (!scope.grp) setScope({ tip: scope.tip, grp: c.key });
   };
 
   const pdfHref = scope.tip

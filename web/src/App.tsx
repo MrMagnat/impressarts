@@ -9,6 +9,7 @@ const NAV = [
   { to: "/", label: "Дашборд", icon: "▦", end: true },
   { to: "/catalog", label: "Каталог", icon: "▤" },
   { to: "/reports", label: "Отчёты", icon: "▧" },
+  { to: "/expiry", label: "Сроки годности", icon: "⏱" },
   { to: "/settings", label: "Настройки", icon: "⚙" },
 ];
 

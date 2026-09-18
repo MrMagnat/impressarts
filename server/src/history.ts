@@ -242,12 +242,16 @@ export function scopeTotalAt(date: string, scope: Scope): KM {
   return r ?? ZERO;
 }
 
-/** Уровень потомков для среза дерева. */
+/**
+ * Уровень потомков для среза дерева. Иерархия: Тип -> Группа -> Позиция.
+ * «Вид» остаётся отдельным уровнем агрегата (к нему привязана цена), но в
+ * навигации не участвует; если он всё же задан в срезе, разбивка идёт по нему.
+ */
 export function childLevelOf(scope: Scope): AggLevel | "position" {
   if (!scope.tip) return "tip";
-  if (!scope.vid) return "vid";
-  if (!scope.grp) return "grp";
-  return "position";
+  if (scope.grp) return "position";
+  if (scope.vid) return "grp";
+  return "grp";
 }
 
 /**
@@ -259,16 +263,21 @@ export function childBreakdownAt(date: string, scope: Scope): Map<string, KM> {
   const level = childLevelOf(scope);
   if (level === "position") {
     if (!hasDetail(date)) return new Map();
+    const where = ["f.date = @date", "p.tip = @tip", "p.grp = @grp"];
+    if (scope.vid) where.push("p.vid = @vid");
     const rows = D()
       .prepare(
         "SELECT p.name AS k, SUM(f.kg) kg, SUM(f.money) money " +
           "FROM fact f JOIN position p ON p.position_id = f.position_id " +
-          "WHERE f.date = @date AND p.tip = @tip AND p.vid = @vid AND p.grp = @grp GROUP BY k",
+          "WHERE " +
+          where.join(" AND ") +
+          " GROUP BY k",
       )
       .all({ date, tip: scope.tip, vid: scope.vid, grp: scope.grp } as any) as any[];
     return new Map(rows.map((r) => [String(r.k), { kg: r.kg, money: r.money } as KM]));
   }
   const keyCol = level === "tip" ? "k1" : level === "vid" ? "k2" : "k3";
+  // при переходе Тип -> Группа вид не фиксирован: группы собираются по всем видам
   const where: string[] = ["date = @date", "level = @level"];
   const bind: Record<string, any> = { date, level };
   if (scope.tip) {
@@ -287,6 +296,33 @@ export function childBreakdownAt(date: string, scope: Scope): Map<string, KM> {
     )
     .all(bind) as any[];
   return new Map(rows.map((r) => [String(r.k), { kg: r.kg, money: r.money } as KM]));
+}
+
+/**
+ * Ряды по типам номенклатуры для накопительного графика: длинный формат
+ * (дата, тип, кг, деньги). Читается из агрегата, поэтому доступен на всю
+ * глубину истории независимо от горячего окна.
+ */
+export function seriesByTip(from?: string, to?: string) {
+  const where: string[] = ["level = 'tip'"];
+  const bind: Record<string, any> = {};
+  if (from) {
+    where.push("date >= @from");
+    bind.from = from;
+  }
+  if (to) {
+    where.push("date <= @to");
+    bind.to = to;
+  }
+  return (
+    D()
+      .prepare(
+        "SELECT date, k1 AS tip, kg, money FROM fact_agg WHERE " +
+          where.join(" AND ") +
+          " ORDER BY date, k1",
+      )
+      .all(bind) as any[]
+  ).map((r) => ({ date: r.date, tip: r.tip, kg: round(r.kg, 1), money: round(r.money) }));
 }
 
 /** Все даты, за которые есть агрегат. */

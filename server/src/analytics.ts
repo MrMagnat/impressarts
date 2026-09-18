@@ -1,6 +1,6 @@
 import { db, currentDate, getSetting } from "./db.js";
 import { round, monthKey } from "./util.js";
-import { seriesFor } from "./history.js";
+import { seriesFor, seriesByTip } from "./history.js";
 
 const D = () => db();
 
@@ -78,27 +78,27 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
   const where: string[] = ["f.date = @cur"];
   const bind: Record<string, any> = { cur };
 
+  // Иерархия: Тип -> Группа -> Позиция -> Партии (в карточке позиции).
+  // «Вид номенклатуры» остаётся в модели данных (к нему привязана цена ₽/кг),
+  // но из навигации убран — группы собираются по всем видам внутри типа.
   if (!tip) {
     level = "tip";
     groupCol = "p.tip";
-  } else if (!vid) {
-    level = "vid";
-    groupCol = "p.vid";
-    where.push("p.tip = @tip");
-    bind.tip = tip;
-  } else if (grp === undefined) {
+  } else if (!grp) {
     level = "grp";
     groupCol = "p.grp";
-    where.push("p.tip = @tip AND p.vid = @vid");
+    where.push("p.tip = @tip");
     bind.tip = tip;
-    bind.vid = vid;
   } else {
     level = "position";
     groupCol = "p.position_id";
-    where.push("p.tip = @tip AND p.vid = @vid AND p.grp = @grp");
+    where.push("p.tip = @tip AND p.grp = @grp");
     bind.tip = tip;
-    bind.vid = vid;
     bind.grp = grp;
+  }
+  if (vid) {
+    where.push("p.vid = @vid");
+    bind.vid = vid;
   }
 
   const rows = D()
@@ -123,9 +123,9 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
     for (const r of D()
       .prepare(
         `SELECT position_id AS id, COUNT(*) AS c FROM batch WHERE date=@cur AND position_id IN
-         (SELECT position_id FROM position WHERE tip=@tip AND vid=@vid AND grp=@grp) GROUP BY position_id`,
+         (SELECT position_id FROM position WHERE tip=@tip AND grp=@grp) GROUP BY position_id`,
       )
-      .all({ cur, tip, vid, grp } as any) as { id: string; c: number }[]) {
+      .all({ cur, tip, grp } as any) as { id: string; c: number }[]) {
       batchCounts.set(r.id, r.c);
     }
   }
@@ -136,7 +136,7 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
     label: String(r.label),
     tip: r.tip,
     vid: level === "tip" ? undefined : r.vid ?? vid,
-    grp: level === "position" ? grp : level === "grp" ? String(r.key) : grp,
+    grp: level === "grp" ? String(r.key) : grp,
     kg: round(r.kg, 1),
     money: round(r.money),
     positions: r.positions,
@@ -295,6 +295,44 @@ export function expiryBuckets(filter: { tip?: string; vid?: string; position_id?
   });
 }
 
+// ---------- РАЗРЕЗЫ ПО ИЗМЕРЕНИЯМ ----------
+
+/**
+ * Топ значений измерения (менеджер / заказчик) по партиям текущего снимка.
+ * Необязательный фильтр по типу номенклатуры.
+ *
+ * Считается по таблице партий, а она хранится только за текущий снимок, —
+ * поэтому разрез доступен для «сейчас на складе», но не задним числом.
+ */
+export function topDim(dim: "manager" | "counterparty", tip?: string, limit = 8) {
+  const cur = currentDate();
+  const col = dim === "manager" ? "manager" : "counterparty";
+  const where = [`b.date = @cur`, `b.${col} IS NOT NULL`];
+  const bind: Record<string, any> = { cur, limit };
+  if (tip) {
+    where.push("b.position_id IN (SELECT position_id FROM position WHERE tip = @tip)");
+    bind.tip = tip;
+  }
+  return D()
+    .prepare(
+      `SELECT b.${col} AS value, SUM(b.kg) kg, SUM(b.money) money, COUNT(*) batches
+       FROM batch b WHERE ${where.join(" AND ")}
+       GROUP BY b.${col} ORDER BY money DESC LIMIT @limit`,
+    )
+    .all(bind)
+    .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
+}
+
+/** Три «текущих» блока дашборда одним запросом, с фильтром по типу. */
+export function breakdown(tip?: string) {
+  return {
+    tip: tip ?? null,
+    expiry: expiryBuckets(tip ? { tip } : {}),
+    topManagers: topDim("manager", tip),
+    topCounterparties: topDim("counterparty", tip),
+  };
+}
+
 // ---------- DASHBOARD ----------
 
 export function dashboard() {
@@ -346,15 +384,6 @@ export function dashboard() {
   // тренд за 26 точек назад — из агрегата, поэтому не зависит от глубины детали
   const trend = seriesFor({}, priorDates(cur, 26).slice(-1)[0] ?? cur);
 
-  const topDim = (dim: string) =>
-    D()
-      .prepare(
-        `SELECT ${dim} AS value, SUM(kg) kg, SUM(money) money, COUNT(*) batches
-         FROM batch WHERE date=@cur AND ${dim} IS NOT NULL
-         GROUP BY ${dim} ORDER BY money DESC LIMIT 8`,
-      )
-      .all({ cur })
-      .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
 
   return {
     currentDate: cur,
@@ -381,5 +410,8 @@ export function dashboard() {
     expiry: expiryBuckets(),
     topManagers: topDim("manager"),
     topCounterparties: topDim("counterparty"),
+    // разложение тренда по типам — для графика с накоплением
+    trendByTip: seriesByTip(priorDates(cur, 26).slice(-1)[0] ?? cur),
+    tips: byTip.map((t: any) => t.tip),
   };
 }

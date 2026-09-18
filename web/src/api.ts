@@ -105,6 +105,9 @@ export interface Dashboard {
   byTip: { tip: string; kg: number; money: number; positions: number }[];
   topVids: { tip: string; vid: string; kg: number; money: number }[];
   trend: { date: string; kg: number; money: number }[];
+  /** Тот же тренд в разрезе типов — для графика с накоплением. */
+  trendByTip: { date: string; tip: string; kg: number; money: number }[];
+  tips: string[];
   expiry: ExpiryBucket[];
   topManagers: DimAgg[];
   topCounterparties: DimAgg[];
@@ -241,6 +244,56 @@ export interface LicenseState {
 }
 
 
+// ---- разрезы и сроки годности ----
+export interface TipPoint {
+  date: string;
+  tip: string;
+  kg: number;
+  money: number;
+}
+export interface Breakdown {
+  tip: string | null;
+  expiry: ExpiryBucket[];
+  topManagers: DimAgg[];
+  topCounterparties: DimAgg[];
+}
+export interface ExpiryBatch {
+  series: string | null;
+  kg: number;
+  money: number;
+  bestBefore: string | null;
+  manufactured: string | null;
+  manager: string | null;
+  counterparty: string | null;
+  daysLeft: number | null;
+  bucket: string;
+}
+export interface ExpiryRow {
+  id: string;
+  name: string;
+  tip: string;
+  vid: string;
+  grp: string;
+  kg: number;
+  money: number;
+  batches: number;
+  nearest: string | null;
+  daysLeft: number | null;
+  bucket: string;
+  overdueKg: number;
+  noDateKg: number;
+  items: ExpiryBatch[];
+}
+export interface ExpiryReport {
+  date: string;
+  filter: { tip: string | null; bucket: string | null; withinDays: number | null };
+  buckets: ExpiryBucket[];
+  tips: string[];
+  totals: { positions: number; kg: number; money: number; batches: number; overdueKg: number };
+  truncated: boolean;
+  rows: ExpiryRow[];
+}
+
 // ---- источник 1С ----
 export interface ScheduleState {
   enabled: boolean;
@@ -359,6 +412,8 @@ export const api = {
   search: (q: string) => req<any[]>("/api/catalog/search?q=" + encodeURIComponent(q)),
 
   dashboard: () => req<Dashboard>("/api/dashboard"),
+  breakdown: (tip?: string) =>
+    req<Breakdown>("/api/dashboard/breakdown" + (tip ? "?tip=" + encodeURIComponent(tip) : "")),
 
   weeks: () => req<string[]>("/api/reports/weeks"),
   months: () => req<{ month: string; date: string }[]>("/api/reports/months"),
@@ -396,6 +451,21 @@ export const api = {
     if (p.vid) q.set("vid", p.vid);
     if (p.grp) q.set("grp", p.grp);
     return req<Competitive>("/api/reports/competitive?" + q.toString());
+  },
+  expiryReport: (p: { tip?: string; bucket?: string; withinDays?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (p.tip) q.set("tip", p.tip);
+    if (p.bucket) q.set("bucket", p.bucket);
+    if (p.withinDays != null) q.set("withinDays", String(p.withinDays));
+    if (p.limit != null) q.set("limit", String(p.limit));
+    return req<ExpiryReport>("/api/reports/expiry?" + q.toString());
+  },
+  expiryPdfUrl: (p: { tip?: string; bucket?: string; withinDays?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (p.tip) q.set("tip", p.tip);
+    if (p.bucket) q.set("bucket", p.bucket);
+    if (p.withinDays != null) q.set("withinDays", String(p.withinDays));
+    return "/api/reports/expiry.pdf?" + q.toString();
   },
   pdfUrl: (kind: "weekly" | "monthly", key?: string) =>
     `/api/reports/${kind}.pdf` + (key ? `?${kind === "weekly" ? "date" : "month"}=${key}` : ""),

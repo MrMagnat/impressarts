@@ -8,6 +8,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Catalog from "./pages/Catalog";
 import Reports from "./pages/Reports";
+import Expiry from "./pages/Expiry";
 import Settings from "./pages/Settings";
 import { Loading } from "./ui";
 import LicenseGate from "./components/LicenseGate";
@@ -32,6 +33,7 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: "catalog", element: <Catalog /> },
       { path: "reports", element: <Reports /> },
+      { path: "expiry", element: <Expiry /> },
       { path: "settings", element: <Settings /> },
     ],
   },

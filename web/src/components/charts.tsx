@@ -88,6 +88,76 @@ export function TrendArea({
   );
 }
 
+/**
+ * Область с накоплением: каждая серия своим цветом, сумма по всем сериям
+ * даёт общий итог. Данные приходят в длинном формате (дата, ключ, значение)
+ * и разворачиваются в широкие строки здесь же.
+ */
+export function StackedTrend({
+  data,
+  keys,
+  colors,
+  metric = "money",
+  height = 260,
+}: {
+  data: { date: string; tip: string; kg: number; money: number }[];
+  keys: string[];
+  colors: Record<string, string>;
+  metric?: "money" | "kg";
+  height?: number;
+}) {
+  const fmt = metric === "money" ? money : weight;
+  const rows = React.useMemo(() => {
+    const byDate = new Map<string, any>();
+    for (const p of data) {
+      let row = byDate.get(p.date);
+      if (!row) {
+        row = { date: p.date };
+        for (const k of keys) row[k] = 0;
+        byDate.set(p.date, row);
+      }
+      row[p.tip] = (row[p.tip] ?? 0) + (metric === "money" ? p.money : p.kg);
+    }
+    return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+  }, [data, keys, metric]);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <AreaChart data={rows} margin={{ top: 6, right: 10, left: 4, bottom: 0 }}>
+        <XAxis
+          dataKey="date"
+          tickFormatter={fmtDateShort}
+          tick={axis}
+          axisLine={false}
+          tickLine={false}
+          minTickGap={28}
+        />
+        <YAxis
+          tick={axis}
+          axisLine={false}
+          tickLine={false}
+          width={54}
+          tickFormatter={metric === "money" ? axisMoney : axisKg}
+        />
+        <Tooltip content={<Tip fmt={fmt} />} />
+        {keys.map((k, i) => (
+          <Area
+            key={k}
+            type="monotone"
+            dataKey={k}
+            name={k}
+            stackId="stock"
+            stroke={colors[k] ?? PALETTE[i % PALETTE.length]}
+            strokeWidth={1.5}
+            fill={colors[k] ?? PALETTE[i % PALETTE.length]}
+            fillOpacity={0.75}
+          />
+        ))}
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
 export function MultiLine({
   data,
   series,
