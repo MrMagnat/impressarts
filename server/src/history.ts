@@ -134,7 +134,9 @@ export function writeAggregateFromRows(date: string, rows: RawRow[]): number {
   for (const r of rows) {
     const pid = hashId(r.tip, "|", r.vid, "|", r.name);
     const grp = groupOf(r.name);
-    const money = r.kg * priceOf(r.tip, r.vid);
+    // стоимость из 1С приоритетнее модельной цены
+    const money =
+      r.cost != null && Number.isFinite(r.cost) ? (r.cost as number) : r.kg * priceOf(r.tip, r.vid);
     bump(["total", "", "", ""].join(SEP), r.kg, money, pid);
     bump(["tip", r.tip, "", ""].join(SEP), r.kg, money, pid);
     bump(["vid", r.tip, r.vid, ""].join(SEP), r.kg, money, pid);

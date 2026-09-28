@@ -44,6 +44,7 @@ export default function Settings() {
 
 function Prices() {
   const { data, loading, reload } = useAsync(() => api.prices(), []);
+  const meta = useAsync(() => api.meta(), []);
   const [edit, setEdit] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -116,10 +117,19 @@ function Prices() {
           </tbody>
         </table>
       </Card>
-      <p className="text-xs text-ink-faint">
-        Цены модельные — до подключения прайса из 1С. После сохранения суммы во всех отчётах и на дашборде
-        пересчитываются автоматически.
-      </p>
+      {meta.data?.currentSource === "1c" ? (
+        <div className="text-sm rounded-lg px-3 py-2.5 bg-amber-50 text-amber-800 leading-relaxed">
+          <b>Текущий снимок загружен из 1С вместе с реальной стоимостью остатков.</b> Суммы на
+          дашборде и в отчётах взяты по факту, а не по этим ценам. Если сохранить цены здесь, суммы
+          по выбранному виду будут пересчитаны как «остаток × цена» и заменят данные из 1С — до
+          следующей загрузки.
+        </div>
+      ) : (
+        <p className="text-xs text-ink-faint">
+          Цены модельные — до подключения прайса из 1С. После сохранения суммы во всех отчётах и на
+          дашборде пересчитываются автоматически.
+        </p>
+      )}
     </div>
   );
 }

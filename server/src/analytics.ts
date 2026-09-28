@@ -41,6 +41,13 @@ export function meta() {
         date: string;
       }[]
     ).map((r) => r.date),
+    // откуда пришёл текущий снимок: '1c' | 'excel' | 'model'
+    currentSource:
+      (
+        D().prepare("SELECT source FROM snapshot WHERE date = ?").get(cur) as
+          | { source: string | null }
+          | undefined
+      )?.source ?? null,
     // даты с полной детализацией (партии, менеджеры, топ-движения)
     detailFrom:
       (

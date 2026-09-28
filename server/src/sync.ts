@@ -77,14 +77,19 @@ function foldRows(rows: RawRow[]) {
   const kg = new Map<string, number>();
   let money = 0;
   let totalKg = 0;
+  let withCost = 0;
   for (const r of rows) {
     const pid = positionId(r);
     kg.set(pid, (kg.get(pid) ?? 0) + r.kg);
-    const p = prices.get(r.vid) ?? defaultPrice(r.tip, r.vid);
-    money += r.kg * p;
+    if (r.cost != null && Number.isFinite(r.cost)) {
+      money += r.cost as number;
+      withCost++;
+    } else {
+      money += r.kg * (prices.get(r.vid) ?? defaultPrice(r.tip, r.vid));
+    }
     totalKg += r.kg;
   }
-  return { byPosition: kg, kg: totalKg, money };
+  return { byPosition: kg, kg: totalKg, money, withCost };
 }
 
 /** Дата, с которой сравниваем: сам запрошенный день, иначе последний снимок. */
@@ -225,6 +230,7 @@ export async function runSync(opts: RunOptions = {}): Promise<SyncResult> {
     `строк ${parsed.rows.length}, позиций ${src.byPosition.size}, ` +
     `новых ${newPositions.length}, исчезло ${gonePositions.length}, изменилось ${changed}, ` +
     `${round(src.kg, 1)} кг / ${round(src.money)} ₽` +
+    (src.withCost > 0 ? ` (стоимость из 1С по ${src.withCost} строкам)` : " (цены модельные)") +
     (baseDate ? ` (база на ${baseDate}: ${round(dbKg, 1)} кг)` : " (сравнивать не с чем)");
 
   // --- запись ---

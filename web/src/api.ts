@@ -35,6 +35,9 @@ export interface Meta {
   firstDate: string | null;
   lastDate: string | null;
   realDates: string[];
+  /** Откуда пришёл текущий снимок: '1c' | 'excel' | 'model'. */
+  currentSource?: string | null;
+  detailFrom?: string | null;
 }
 
 export interface TreeNode {

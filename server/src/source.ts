@@ -189,26 +189,57 @@ type Field =
   | "bestBefore"
   | "manufactured"
   | "manager"
-  | "counterparty";
+  | "counterparty"
+  | "cost";
 
 /** Алиасы проверяются по точному совпадению нормализованного имени, сверху вниз. */
 const ALIASES: Record<Field, string[]> = {
-  date: ["дата", "date", "датаостатка", "периоддата", "надату"],
-  name: ["номенклатура", "name", "наименование", "позиция", "nomenclature"],
-  vid: ["видноменклатуры", "вид", "vid", "видномен"],
-  tip: ["типноменклатуры", "тип", "tip", "типномен"],
-  series: ["серия", "series", "партия"],
-  kg: ["остатоккг", "остаток", "кг", "количество", "колво", "kg", "qty", "quantity", "ostatok"],
-  bestBefore: ["сериягоденддо", "сериягодендо", "годендо", "срокгодности", "bestbefore", "godendo"],
+  date: ["date", "дата", "датаостатка", "периоддата", "надату"],
+  name: ["name", "номенклатура", "наименование", "позиция", "nomenclature"],
+  // Parents — непосредственный родитель номенклатуры в дереве 1С
+  vid: ["parents", "видноменклатуры", "вид", "vid", "видномен", "parent"],
+  // TypeN / TypeN_Name — тип номенклатуры
+  tip: ["typen", "typenname", "типноменклатуры", "тип", "tip", "типномен"],
+  series: ["series", "серия", "партия"],
+  // BalanceKG — остаток в килограммах
+  kg: [
+    "balancekg",
+    "balance",
+    "остатоккг",
+    "остаток",
+    "кг",
+    "количество",
+    "колво",
+    "kg",
+    "qty",
+    "quantity",
+    "ostatok",
+  ],
+  // ExpD — годен до
+  bestBefore: [
+    "expd",
+    "expdate",
+    "сериягоденддо",
+    "сериягодендо",
+    "годендо",
+    "срокгодности",
+    "bestbefore",
+    "godendo",
+  ],
+  // MFD — дата изготовления
   manufactured: [
+    "mfd",
+    "mfgdate",
     "сериядатаизготовления",
     "датаизготовления",
     "изготовлено",
     "manufactured",
     "dateofmanufacture",
   ],
-  manager: ["менеджер", "manager", "серияменеджер", "ответственный"],
-  counterparty: ["заказчик", "контрагент", "counterparty", "сериязаказчик", "client"],
+  manager: ["manager", "менеджер", "серияменеджер", "ответственный"],
+  counterparty: ["client", "заказчик", "контрагент", "counterparty", "сериязаказчик"],
+  // CostRub — реальная стоимость остатка по строке, ₽
+  cost: ["costrub", "cost", "стоимость", "суммаруб", "сумма", "amount", "costrur"],
 };
 
 /** Найти исходный ключ, соответствующий полю: точное совпадение, затем префикс. */
@@ -325,6 +356,7 @@ function parseJson(raw: string, askDate: string): ParsedSource {
       manufactured: col.manufactured ? dateCell(o[col.manufactured]) : null,
       manager: (col.manager ? text(o[col.manager]) : "") || null,
       counterparty: (col.counterparty ? text(o[col.counterparty]) : "") || null,
+      cost: col.cost ? num(o[col.cost]) : null,
     });
   }
   const mapped = Object.values(col).filter(Boolean) as string[];
@@ -385,6 +417,7 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
       manufactured: dateCell(at(cells, "manufactured")),
       manager: at(cells, "manager") || null,
       counterparty: at(cells, "counterparty") || null,
+      cost: col.cost ? num(at(cells, "cost")) : null,
     });
   }
   const mapped = Object.values(col).filter(Boolean) as string[];

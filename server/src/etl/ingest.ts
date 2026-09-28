@@ -74,8 +74,12 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
       const pid = positionId(r.tip, r.vid, r.name);
       const grp = groupOf(r.name);
       insPos.run(pid, r.tip, r.vid, grp, r.name);
-      const price = prices.get(r.vid) ?? 0;
-      const money = r.kg * price;
+      // 1С отдаёт реальную стоимость остатка (CostRub) — она приоритетнее
+      // модельной цены ₽/кг; ₽/кг тогда выводим обратным счётом
+      const listPrice = prices.get(r.vid) ?? 0;
+      const hasCost = r.cost != null && Number.isFinite(r.cost);
+      const money = hasCost ? (r.cost as number) : r.kg * listPrice;
+      const price = hasCost && r.kg > 0 ? money / r.kg : listPrice;
       insBatch.run(
         snapshotDate,
         pid,
@@ -85,7 +89,7 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
         r.manufactured,
         r.manager,
         r.counterparty,
-        price,
+        round(price, 2),
         round(money),
       );
       posKg.set(pid, (posKg.get(pid) ?? 0) + r.kg);

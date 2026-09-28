@@ -11,6 +11,12 @@ export interface RawRow {
   manufactured: string | null;
   manager: string | null;
   counterparty: string | null;
+  /**
+   * Реальная стоимость остатка по строке, ₽ (поле CostRub в 1С).
+   * Если источник её отдаёт — деньги считаются по факту, а не по модельной
+   * цене ₽/кг из таблицы price. Excel-выгрузка этого поля не содержит.
+   */
+  cost?: number | null;
 }
 
 export interface ImportResult {
