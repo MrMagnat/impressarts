@@ -15,6 +15,7 @@
 import { db, currentDate } from "./db.js";
 import { round, addDays, monthKey, groupOf, hashId } from "./util.js";
 import { defaultPrice } from "./etl/prices.js";
+import { bumpDataVersion } from "./cache.js";
 import type { RawRow } from "./etl/import-excel.js";
 
 const D = () => db();
@@ -82,6 +83,7 @@ export function writeAggregate(date: string): number {
       n++;
     }
   }
+  bumpDataVersion();
   return n;
 }
 
@@ -158,6 +160,7 @@ export function writeAggregateFromRows(date: string, rows: RawRow[]): number {
     d.exec("ROLLBACK");
     throw e;
   }
+  bumpDataVersion();
   return buckets.size;
 }
 
@@ -183,6 +186,7 @@ export function repriceAggregate(vid: string, price: number): void {
       "  WHERE t.date = a.date AND t.level = 'tip'" +
       ") WHERE a.level = 'total'",
   );
+  bumpDataVersion();
 }
 
 // ---------- чтение агрегата ----------
@@ -386,16 +390,20 @@ export interface TrimResult {
  * удалить детальные `fact` и `batch`, пометить снимок detail=0.
  * Партии оставляем только за текущий снимок — исторические никем не читаются.
  */
-export function trimDetail(retentionDays: number): TrimResult {
+export function trimDetail(retentionDays: number, maxDates = 12): TrimResult {
   const d = D();
   const cur = currentDate();
   if (!cur) return { cutoff: "", aggregated: [], factRowsDeleted: 0, batchRowsDeleted: 0 };
   const cutoff = addDays(cur, -Math.abs(retentionDays));
 
+  // За один проход сжимаем ограниченное число дат: на первом импорте в базе
+  // может накопиться под сотню старых снимков, и разгребать их все в одном
+  // запросе — это десятки секунд ожидания. Остальные уйдут на следующих
+  // запусках, дашборд от этого не страдает: он читает агрегат.
   const stale = (
     d
-      .prepare("SELECT DISTINCT date FROM fact WHERE date < ? AND date <> ? ORDER BY date")
-      .all(cutoff, cur) as { date: string }[]
+      .prepare("SELECT DISTINCT date FROM fact WHERE date < ? AND date <> ? ORDER BY date LIMIT ?")
+      .all(cutoff, cur, Math.max(1, maxDates)) as { date: string }[]
   ).map((r) => r.date);
 
   let factDeleted = 0;
@@ -414,6 +422,7 @@ export function trimDetail(retentionDays: number): TrimResult {
     d.exec("ROLLBACK");
     throw e;
   }
+  bumpDataVersion();
   return { cutoff, aggregated: stale, factRowsDeleted: factDeleted, batchRowsDeleted: batchDeleted };
 }
 

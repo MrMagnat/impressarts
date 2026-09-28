@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+import { bumpDataVersion } from "./cache.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(__dirname, "../../data");
@@ -17,6 +18,13 @@ export function db(): DatabaseSync {
   _db = new DatabaseSync(DB_PATH);
   _db.exec("PRAGMA journal_mode = WAL;");
   _db.exec("PRAGMA foreign_keys = ON;");
+  // Настройки под профиль нагрузки: редкие крупные записи (импорт снимка на
+  // десятки тысяч строк) и частые чтения. synchronous=NORMAL в паре с WAL
+  // безопасен при падении процесса и кратно ускоряет запись.
+  _db.exec("PRAGMA synchronous = NORMAL;");
+  _db.exec("PRAGMA temp_store = MEMORY;");
+  _db.exec("PRAGMA cache_size = -65536;"); // 64 МБ страничного кэша
+  _db.exec("PRAGMA mmap_size = 268435456;"); // 256 МБ
   return _db;
 }
 
@@ -132,6 +140,15 @@ export function initSchema(): void {
     CREATE INDEX IF NOT EXISTS ix_synclog_at ON sync_log(started_at DESC);
   `);
 
+  // Индексы под реальный объём: без них выборки по дате идут полным перебором
+  // таблицы партий (десятки тысяч строк на каждый запрос дашборда).
+  d.exec(`
+    CREATE INDEX IF NOT EXISTS ix_batch_date     ON batch(date);
+    CREATE INDEX IF NOT EXISTS ix_batch_date_pos ON batch(date, position_id);
+    CREATE INDEX IF NOT EXISTS ix_batch_date_exp ON batch(date, best_before);
+    CREATE INDEX IF NOT EXISTS ix_position_tg    ON position(tip, grp);
+  `);
+
   // --- миграции существующих БД (идемпотентно) ---
   for (const sql of [
     "ALTER TABLE snapshot ADD COLUMN grain TEXT", // 'day' | 'week' | 'month'
@@ -164,6 +181,7 @@ export function setSetting(key: string, value: string): void {
       "INSERT INTO setting(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .run(key, value);
+  bumpDataVersion();
 }
 
 /** Latest real snapshot date (the "current" state). */

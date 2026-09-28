@@ -1,6 +1,7 @@
 import { db, currentDate, getSetting } from "./db.js";
 import { round, monthKey } from "./util.js";
 import { seriesFor, seriesByTip } from "./history.js";
+import { cached } from "./cache.js";
 
 const D = () => db();
 
@@ -27,6 +28,10 @@ export function priorDates(date: string, n: number): string[] {
 }
 
 export function meta() {
+  return cached("meta", buildMeta);
+}
+
+function buildMeta() {
   const cur = currentDate();
   const dates = snapshotDates();
   return {
@@ -77,6 +82,16 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
   parent: { level: string; label: string; kg: number; money: number };
   children: TreeNode[];
 } {
+  return cached(
+    "tree:" + [params.tip, params.vid, params.grp].join(""),
+    () => buildTree(params),
+  );
+}
+
+function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
+  parent: { level: string; label: string; kg: number; money: number };
+  children: TreeNode[];
+} {
   const cur = currentDate();
   const { tip, vid, grp } = params;
 
@@ -108,19 +123,40 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
     bind.vid = vid;
   }
 
-  const rows = D()
-    .prepare(
-      `SELECT ${groupCol} AS key,
-              ${level === "position" ? "p.name" : groupCol} AS label,
-              p.tip AS tip, ${level === "tip" ? "NULL" : "p.vid"} AS vid,
-              SUM(f.kg) AS kg, SUM(f.money) AS money,
-              COUNT(DISTINCT p.position_id) AS positions
-       FROM fact f JOIN position p ON p.position_id = f.position_id
-       WHERE ${where.join(" AND ")}
-       GROUP BY ${groupCol}
-       ORDER BY money DESC`,
-    )
-    .all(bind) as any[];
+  // Уровни «тип» и «группа» целиком покрываются агрегатом — джойн детальных
+  // таблиц на десятки тысяч строк там не нужен. Детализация читается только
+  // на уровне позиций.
+  let rows: any[];
+  if (level === "tip") {
+    rows = D()
+      .prepare(
+        `SELECT k1 AS key, k1 AS label, k1 AS tip, NULL AS vid,
+                kg, money, positions
+         FROM fact_agg WHERE date = @cur AND level = 'tip' ORDER BY money DESC`,
+      )
+      .all({ cur }) as any[];
+  } else if (level === "grp") {
+    rows = D()
+      .prepare(
+        `SELECT k3 AS key, k3 AS label, k1 AS tip, MIN(k2) AS vid,
+                SUM(kg) AS kg, SUM(money) AS money, SUM(positions) AS positions
+         FROM fact_agg WHERE date = @cur AND level = 'grp' AND k1 = @tip
+         GROUP BY k3 ORDER BY money DESC`,
+      )
+      .all({ cur, tip } as any) as any[];
+  } else {
+    rows = D()
+      .prepare(
+        `SELECT ${groupCol} AS key, p.name AS label, p.tip AS tip, p.vid AS vid,
+                SUM(f.kg) AS kg, SUM(f.money) AS money,
+                COUNT(DISTINCT p.position_id) AS positions
+         FROM fact f JOIN position p ON p.position_id = f.position_id
+         WHERE ${where.join(" AND ")}
+         GROUP BY ${groupCol}
+         ORDER BY money DESC`,
+      )
+      .all(bind) as any[];
+  }
 
   const totalMoney = rows.reduce((s, r) => s + r.money, 0) || 1;
 
@@ -166,6 +202,10 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
 // ---------- POSITION CARD ----------
 
 export function positionCard(id: string) {
+  return cached("pos:" + id, () => buildPositionCard(id));
+}
+
+function buildPositionCard(id: string) {
   const cur = currentDate();
   const pos = D()
     .prepare("SELECT position_id, tip, vid, grp, name FROM position WHERE position_id = ?")
@@ -332,17 +372,21 @@ export function topDim(dim: "manager" | "counterparty", tip?: string, limit = 8)
 
 /** Три «текущих» блока дашборда одним запросом, с фильтром по типу. */
 export function breakdown(tip?: string) {
-  return {
+  return cached("breakdown:" + (tip ?? ""), () => ({
     tip: tip ?? null,
     expiry: expiryBuckets(tip ? { tip } : {}),
     topManagers: topDim("manager", tip),
     topCounterparties: topDim("counterparty", tip),
-  };
+  }));
 }
 
 // ---------- DASHBOARD ----------
 
 export function dashboard() {
+  return cached("dashboard", buildDashboard);
+}
+
+function buildDashboard() {
   const cur = currentDate();
   const prev = prevDate(cur);
   const priors = priorDates(cur, 4);

@@ -1,5 +1,6 @@
 import { db, currentDate } from "./db.js";
 import { round, monthKey } from "./util.js";
+import { cached } from "./cache.js";
 import { prevDate, priorDates, expiryBuckets } from "./analytics.js";
 import {
   aggAt,
@@ -141,6 +142,10 @@ function buildComparison(targetDate: string, prevD: string | null, avgDates: str
 }
 
 export function weeklyReport(date?: string) {
+  return cached("weekly:" + (date ?? ""), () => buildWeekly(date));
+}
+
+function buildWeekly(date?: string) {
   const target = date ?? currentDate();
   const prev = prevDate(target);
   const avgDates = priorDates(target, 8);
@@ -162,6 +167,10 @@ export function monthEnds(): { month: string; date: string }[] {
 }
 
 export function monthlyReport(month?: string) {
+  return cached("monthly:" + (month ?? ""), () => buildMonthly(month));
+}
+
+function buildMonthly(month?: string) {
   const ends = monthEnds();
   const idx = month ? ends.findIndex((e) => e.month === month) : ends.length - 1;
   const cur = ends[idx];
@@ -209,6 +218,11 @@ function scopeWhere(s: ScopeSel): { clause: string; bind: Record<string, any> } 
  * trend (all snapshots for the chosen granularity), and top movers within scope.
  */
 export function scopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: string) {
+  const key = ["scope", scope.tip, scope.vid, scope.grp, kind, period].join("");
+  return cached(key, () => buildScopeReport(scope, kind, period));
+}
+
+function buildScopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: string) {
   const { clause, bind } = scopeWhere(scope);
 
   // period axis
@@ -349,6 +363,11 @@ export interface ExpiryParams {
  * поэтому отчёт всегда про «сейчас на складе».
  */
 export function expiryReport(p: ExpiryParams = {}) {
+  const key = ["expiry", p.tip, p.bucket, p.withinDays, p.limit].join("");
+  return cached(key, () => buildExpiryReport(p));
+}
+
+function buildExpiryReport(p: ExpiryParams = {}) {
   const cur = currentDate();
   const limit = Math.min(Math.max(p.limit ?? 300, 1), 2000);
 
@@ -600,6 +619,11 @@ function withShares(items: BreakItem[], topN = 10) {
 }
 
 export function competitive(p: CompetitiveParams) {
+  const key = ["comp", p.type, p.id, p.tip, p.vid, p.grp, p.dim].join("");
+  return cached(key, () => buildCompetitive(p));
+}
+
+function buildCompetitive(p: CompetitiveParams) {
   const cur = currentDate();
   const prev = prevDate(cur);
   const avgDates = priorDates(cur, 8);

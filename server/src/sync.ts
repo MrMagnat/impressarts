@@ -245,13 +245,8 @@ export async function runSync(opts: RunOptions = {}): Promise<SyncResult> {
         ingestSnapshot({ snapshotDate, rows: parsed.rows });
         writeAggregate(snapshotDate);
         markSnapshot(snapshotDate, "day", "1c", 1);
-        const t = trimDetail(cfg.retentionDays);
-        if (t.aggregated.length) {
-          log(
-            `[sync] сжато в агрегат ${t.aggregated.length} дат старше ${t.cutoff}: ` +
-              `-${t.factRowsDeleted} строк fact, -${t.batchRowsDeleted} партий`,
-          );
-        }
+        // Сжатие старых дат — фоновая уборка, ответ её не ждёт.
+        drainTrim(cfg.retentionDays);
       }
       status = "imported";
       message = "Загружено: " + summary;
@@ -305,6 +300,49 @@ export async function runSync(opts: RunOptions = {}): Promise<SyncResult> {
     sample: fetched.sample,
     diag: parsed.diag,
   };
+}
+
+let trimming = false;
+
+/**
+ * Сжать накопившиеся старые снимки по одному за такт событийного цикла.
+ *
+ * SQLite работает синхронно, а Node однопоточный: если разгрести сотню дат
+ * одним куском, дашборд на это время замирает. По одной дате за раз пауза
+ * измеряется десятками миллисекунд и на отзывчивости не сказывается.
+ */
+function drainTrim(retentionDays: number): void {
+  if (trimming) return;
+  trimming = true;
+  let dates = 0;
+  let factRows = 0;
+  let batchRows = 0;
+  let cutoff = "";
+
+  const step = () => {
+    try {
+      const t = trimDetail(retentionDays, 1);
+      cutoff = t.cutoff || cutoff;
+      if (t.aggregated.length === 0) {
+        trimming = false;
+        if (dates > 0) {
+          log(
+            `[sync] сжато в агрегат ${dates} дат старше ${cutoff}: ` +
+              `-${factRows} строк fact, -${batchRows} партий`,
+          );
+        }
+        return;
+      }
+      dates += t.aggregated.length;
+      factRows += t.factRowsDeleted;
+      batchRows += t.batchRowsDeleted;
+      setImmediate(step);
+    } catch (e: any) {
+      trimming = false;
+      log("[sync] сжатие истории не удалось: " + (e?.message ?? String(e)));
+    }
+  };
+  setImmediate(step);
 }
 
 function markSnapshot(date: string, grain: string, source: string, detail: number): void {
