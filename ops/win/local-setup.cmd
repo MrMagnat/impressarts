@@ -29,7 +29,7 @@ if not exist "package.json" (
 where node >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Node.js is not installed.
-    echo         Download the LTS installer from https://nodejs.org (version 22 or newer)
+    echo         Download the LTS installer from https://nodejs.org - version 22 or newer,
     echo         and run this script again.
     pause
     exit /b 1
