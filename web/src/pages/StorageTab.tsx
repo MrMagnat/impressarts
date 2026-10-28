@@ -11,7 +11,7 @@ function mb(bytes: number): string {
 export default function StorageTab() {
   const { data, loading, reload } = useAsync(() => api.storageStats(), []);
   const [days, setDays] = useState<number | null>(null);
-  const [busy, setBusy] = useState<"" | "compact" | "backfill">("");
+  const [busy, setBusy] = useState<"" | "compact" | "backfill" | "purge">("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -38,6 +38,35 @@ export default function StorageTab() {
           ". Граница детализации — " +
           fmtDate(r.cutoff) +
           ".",
+      });
+      reload();
+    } catch (e: any) {
+      setMsg({ ok: false, text: e?.message ?? "Ошибка" });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const purge = async () => {
+    setBusy("purge");
+    setMsg(null);
+    try {
+      const r = await api.storagePurgeModeled();
+      setMsg({
+        ok: true,
+        text: r.dates.length
+          ? "Удалена смоделированная история: " +
+            r.dates.length +
+            " точек (" +
+            fmtDate(r.from ?? "") +
+            " — " +
+            fmtDate(r.to ?? "") +
+            "), строк остатков " +
+            fmtNum(r.factRowsDeleted) +
+            ", строк агрегата " +
+            fmtNum(r.aggRowsDeleted) +
+            "."
+          : "Смоделированных точек в базе нет — удалять нечего.",
       });
       reload();
     } catch (e: any) {
@@ -109,6 +138,42 @@ export default function StorageTab() {
           Значение сохраняется на вкладке «Источник 1С» и применяется автоматически после каждой
           загрузки. Кнопка выполняет сжатие немедленно и уплотняет файл базы.
         </p>
+      </Card>
+
+      <Card className="p-6 space-y-4">
+        <div>
+          <h3 className="font-semibold">Смоделированная история</h3>
+          <p className="text-sm text-ink-mut mt-1">
+            Демонстрационная база собиралась с историей, смоделированной назад по трендам и
+            сезонности. Рядом с реальными данными из 1С такие точки искажают сравнения и тренды.
+            После импорта реальной выгрузки они удаляются автоматически; кнопка — на случай, если
+            что-то осталось. Реальные снимки не трогаются.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="text-sm">
+            {data.modeledDates > 0 ? (
+              <>
+                В базе <b className="num">{fmtNum(data.modeledDates)}</b> смоделированных точек
+                {data.modeledFrom && (
+                  <>
+                    {" "}
+                    ({fmtDate(data.modeledFrom)} — {fmtDate(data.modeledTo ?? "")})
+                  </>
+                )}
+              </>
+            ) : (
+              <span className="text-ink-mut">Смоделированных точек нет — только реальные снимки.</span>
+            )}
+          </div>
+          <button
+            disabled={!!busy || data.modeledDates === 0}
+            className="btn-primary"
+            onClick={purge}
+          >
+            {busy === "purge" ? <Spinner className="!border-white/40 !border-t-white" /> : "Удалить смоделированную историю"}
+          </button>
+        </div>
       </Card>
 
       <Card className="p-6 space-y-4">

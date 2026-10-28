@@ -15,6 +15,7 @@ import {
   searchPositions,
   dashboard,
   breakdown,
+  compareOffsetDays,
 } from "./analytics.js";
 import {
   weeklyReport,
@@ -24,6 +25,7 @@ import {
   scopeReport,
   expiryReport,
   type ExpiryBucketKey,
+  type ExpirySort,
 } from "./reports.js";
 import {
   reportHtml,
@@ -59,8 +61,10 @@ import {
   writeAggregateAll,
   repriceAggregate,
   trimDetail,
+  purgeModeled,
   storageStats,
 } from "./history.js";
+import { logError, recentAppLog, clearAppLog } from "./applog.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST = path.resolve(__dirname, "../../web/dist");
@@ -81,6 +85,17 @@ ensurePassword();
 }
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
+
+// Любая необработанная ошибка маршрута попадает и в stdout, и в журнал в базе,
+// чтобы её было видно из интерфейса, а не только через `docker compose logs`.
+app.setErrorHandler((err: any, req: any, reply: any) => {
+  const status = err.statusCode && err.statusCode >= 400 ? err.statusCode : 500;
+  if (status >= 500) {
+    app.log.error({ err, url: req.url }, "unhandled route error");
+    logError(req.method + " " + req.url, err);
+  }
+  reply.code(status).send({ error: err.message ?? "Внутренняя ошибка сервера" });
+});
 
 await app.register(cookie, {
   secret: process.env.COOKIE_SECRET ?? "sklad-demo-secret-change-me",
@@ -177,6 +192,8 @@ const api = async (app: any) => {
       bucket: (q.bucket as ExpiryBucketKey) || undefined,
       withinDays: Number.isFinite(within) ? within : undefined,
       limit: parseInt(q.limit ?? "", 10) || undefined,
+      sort: (q.sort as ExpirySort) || undefined,
+      dir: (q.dir === "asc" || q.dir === "desc" ? q.dir : undefined) as "asc" | "desc" | undefined,
     };
   };
 
@@ -312,6 +329,7 @@ const api = async (app: any) => {
   app.get("/settings/general", async () => ({
     currency: getSetting("currency", "₽"),
     expiryWarnDays: parseInt(getSetting("expiry_warn_days", "60"), 10),
+    compareOffsetDays: compareOffsetDays(),
     currentDate: currentDate(),
     passwordSet: true,
     uploads: fs
@@ -325,6 +343,10 @@ const api = async (app: any) => {
     const b = req.body ?? {};
     if (b.currency) setSetting("currency", String(b.currency));
     if (b.expiryWarnDays != null) setSetting("expiry_warn_days", String(parseInt(b.expiryWarnDays, 10)));
+    if (b.compareOffsetDays != null) {
+      const n = parseInt(b.compareOffsetDays, 10);
+      if (Number.isFinite(n) && n > 0) setSetting("compare_offset_days", String(n));
+    }
     if (b.password) setSetting("password", String(b.password));
     return { ok: true };
   });
@@ -422,6 +444,12 @@ const api = async (app: any) => {
 
   // ---------- ХРАНЕНИЕ И ГЛУБИНА ИСТОРИИ ----------
 
+  // журнал ошибок приложения
+  app.get("/logs", async (req: any) =>
+    recentAppLog(parseInt(req.query.limit ?? "", 10) || 100),
+  );
+  app.post("/logs/clear", async () => ({ ok: true, deleted: clearAppLog() }));
+
   app.get("/storage/stats", async () => ({
     ...storageStats(),
     retentionDays: sourceConfig().retentionDays,
@@ -444,6 +472,13 @@ const api = async (app: any) => {
     return backfillRange(String(b.from), String(b.to), step, max);
   });
 
+  /** Удалить смоделированную историю, оставив только реальные снимки. */
+  app.post("/storage/purge-modeled", async () => {
+    const r = purgeModeled();
+    if (r.dates.length) db().exec("VACUUM");
+    return { ok: true, ...r, stats: storageStats() };
+  });
+
   app.post("/settings/import", async (req: any, reply: any) => {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: "Файл не получен" });
@@ -454,6 +489,9 @@ const api = async (app: any) => {
       const res = await importExcel(dest);
       const ing = ingestSnapshot(res);
       writeAggregate(ing.date);
+      // Пришёл реальный снимок — смоделированная история больше не нужна и
+      // только искажает тренды и сравнения рядом с фактом.
+      const purged = purgeModeled();
       const trimmed = trimDetail(sourceConfig().retentionDays);
       return {
         ok: true,
@@ -461,8 +499,12 @@ const api = async (app: any) => {
         positions: ing.positions,
         rows: res.rows.length,
         compacted: trimmed.aggregated.length,
+        purgedModeled: purged.dates.length,
+        purgedFrom: purged.from,
+        purgedTo: purged.to,
       };
     } catch (e: any) {
+      logError("POST /api/settings/import", e, "файл: " + safe);
       return reply.code(400).send({ error: e?.message ?? "Ошибка импорта" });
     }
   });

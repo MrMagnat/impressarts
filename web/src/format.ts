@@ -53,23 +53,73 @@ export function trendColor(n: number): string {
   return n > 0.05 ? "text-up" : n < -0.05 ? "text-down" : "text-ink-faint";
 }
 
-/** For inventory, a DROP in stock is usually "good" (less frozen money). Neutral coloring by default. */
-export const TIP_COLORS: Record<string, string> = {
+/**
+ * Палитра для категорийных разрезов. Соседние цвета разведены по тону и
+ * светлоте, чтобы различаться и в легенде, и в узкой полоске графика с
+ * накоплением, и на распечатанном в серой гамме PDF.
+ */
+export const PALETTE = [
+  "#f59c21", // оранжевый (бренд)
+  "#123454", // тёмно-синий (бренд)
+  "#0a8f5b", // зелёный
+  "#e0568a", // розовый
+  "#00aeef", // голубой
+  "#9e0502", // тёмно-красный
+  "#6b4fbb", // фиолетовый
+  "#8a6d1f", // охра
+  "#f25830", // коралловый (бренд)
+  "#2b7a78", // бирюзовый
+  "#b4472e", // кирпичный
+  "#4b6cb7", // стальной синий
+  "#7a9a01", // оливковый
+  "#c2185b", // малиновый
+  "#5d7a8c", // серо-синий
+  "#d98b00", // янтарный
+];
+
+/** Исторические цвета типов демо-базы — чтобы знакомые экраны не «переехали». */
+const TIP_COLOR_OVERRIDES: Record<string, string> = {
   "Готовая продукция": "#f59c21",
   "Материалы в ролях": "#123454",
   Полуфабрикаты: "#f25830",
 };
 
-// Impress-brand derived palette: orange, navy, coral, cyan, deep-red, teal…
-export const PALETTE = [
-  "#f59c21",
-  "#123454",
-  "#f25830",
-  "#00aeef",
-  "#9e0502",
-  "#0a8f5b",
-  "#db8410",
-  "#3d6b99",
-  "#e0568a",
-  "#6b4fbb",
-];
+/**
+ * Цвета типов номенклатуры по фактическому списку типов.
+ *
+ * Раньше это был словарь на три захардкоженных названия, а всё остальное
+ * получало один и тот же оранжевый fallback — на реальной выгрузке из 1С,
+ * где названия типов другие, график с накоплением рисовался одним цветом.
+ * Теперь цвет назначается по позиции типа в списке, а знакомые названия
+ * сохраняют прежние цвета.
+ */
+export function tipColors(tips: string[]): Record<string, string> {
+  const used = new Set<string>();
+  const out: Record<string, string> = {};
+  for (const t of tips) {
+    const fixed = TIP_COLOR_OVERRIDES[t];
+    if (fixed) {
+      out[t] = fixed;
+      used.add(fixed);
+    }
+  }
+  let i = 0;
+  for (const t of tips) {
+    if (out[t]) continue;
+    while (used.has(PALETTE[i % PALETTE.length]) && i < PALETTE.length) i++;
+    const c = PALETTE[i % PALETTE.length];
+    out[t] = c;
+    used.add(c);
+    i++;
+  }
+  return out;
+}
+
+/** Цвет одного типа вне списка (поиск, карточка) — стабилен по имени. */
+export function tipColor(tip: string, map?: Record<string, string>): string {
+  if (map?.[tip]) return map[tip];
+  if (TIP_COLOR_OVERRIDES[tip]) return TIP_COLOR_OVERRIDES[tip];
+  let h = 0;
+  for (let i = 0; i < tip.length; i++) h = (h * 31 + tip.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}

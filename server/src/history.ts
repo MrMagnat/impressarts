@@ -249,15 +249,14 @@ export function scopeTotalAt(date: string, scope: Scope): KM {
 }
 
 /**
- * Уровень потомков для среза дерева. Иерархия: Тип -> Группа -> Позиция.
- * «Вид» остаётся отдельным уровнем агрегата (к нему привязана цена), но в
- * навигации не участвует; если он всё же задан в срезе, разбивка идёт по нему.
+ * Уровень потомков для среза дерева. Иерархия: Тип -> Вид -> Позиция.
+ * «Группа» остаётся уровнем агрегата для совместимости со старыми срезами:
+ * если она задана явно, разбивка идёт сразу до позиций.
  */
 export function childLevelOf(scope: Scope): AggLevel | "position" {
   if (!scope.tip) return "tip";
-  if (scope.grp) return "position";
-  if (scope.vid) return "grp";
-  return "grp";
+  if (scope.vid || scope.grp) return "position";
+  return "vid";
 }
 
 /**
@@ -269,8 +268,18 @@ export function childBreakdownAt(date: string, scope: Scope): Map<string, KM> {
   const level = childLevelOf(scope);
   if (level === "position") {
     if (!hasDetail(date)) return new Map();
-    const where = ["f.date = @date", "p.tip = @tip", "p.grp = @grp"];
-    if (scope.vid) where.push("p.vid = @vid");
+    // node:sqlite отвергает именованные параметры, которых нет в SQL,
+    // поэтому список привязок собирается ровно по условиям
+    const where = ["f.date = @date", "p.tip = @tip"];
+    const bind: Record<string, any> = { date, tip: scope.tip };
+    if (scope.vid) {
+      where.push("p.vid = @vid");
+      bind.vid = scope.vid;
+    }
+    if (scope.grp) {
+      where.push("p.grp = @grp");
+      bind.grp = scope.grp;
+    }
     const rows = D()
       .prepare(
         "SELECT p.name AS k, SUM(f.kg) kg, SUM(f.money) money " +
@@ -279,11 +288,10 @@ export function childBreakdownAt(date: string, scope: Scope): Map<string, KM> {
           where.join(" AND ") +
           " GROUP BY k",
       )
-      .all({ date, tip: scope.tip, vid: scope.vid, grp: scope.grp } as any) as any[];
+      .all(bind) as any[];
     return new Map(rows.map((r) => [String(r.k), { kg: r.kg, money: r.money } as KM]));
   }
   const keyCol = level === "tip" ? "k1" : level === "vid" ? "k2" : "k3";
-  // при переходе Тип -> Группа вид не фиксирован: группы собираются по всем видам
   const where: string[] = ["date = @date", "level = @level"];
   const bind: Record<string, any> = { date, level };
   if (scope.tip) {
@@ -426,6 +434,62 @@ export function trimDetail(retentionDays: number, maxDates = 12): TrimResult {
   return { cutoff, aggregated: stale, factRowsDeleted: factDeleted, batchRowsDeleted: batchDeleted };
 }
 
+export interface PurgeResult {
+  dates: string[];
+  from: string | null;
+  to: string | null;
+  factRowsDeleted: number;
+  aggRowsDeleted: number;
+}
+
+/**
+ * Удалить смоделированную историю: снимки kind='modeled' и всё, что на них
+ * ссылается. Нужна после первого импорта реальной выгрузки — модельные недели
+ * (их генерирует `modelHistory` при сборке демо-базы) иначе продолжают жить в
+ * трендах и отчётах рядом с фактом и искажают сравнения.
+ *
+ * Реальные снимки — загруженные из файла или из 1С — не трогаются.
+ */
+export function purgeModeled(): PurgeResult {
+  const d = D();
+  const dates = (
+    d.prepare("SELECT date FROM snapshot WHERE kind = 'modeled' ORDER BY date").all() as {
+      date: string;
+    }[]
+  ).map((r) => r.date);
+  if (dates.length === 0) {
+    return { dates: [], from: null, to: null, factRowsDeleted: 0, aggRowsDeleted: 0 };
+  }
+
+  let factRows = 0;
+  let aggRows = 0;
+  d.exec("BEGIN");
+  try {
+    const delFact = d.prepare("DELETE FROM fact WHERE date = ?");
+    const delAgg = d.prepare("DELETE FROM fact_agg WHERE date = ?");
+    const delBatch = d.prepare("DELETE FROM batch WHERE date = ?");
+    const delSnap = d.prepare("DELETE FROM snapshot WHERE date = ? AND kind = 'modeled'");
+    for (const date of dates) {
+      factRows += Number(delFact.run(date).changes ?? 0);
+      aggRows += Number(delAgg.run(date).changes ?? 0);
+      delBatch.run(date);
+      delSnap.run(date);
+    }
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
+  bumpDataVersion();
+  return {
+    dates,
+    from: dates[0],
+    to: dates[dates.length - 1],
+    factRowsDeleted: factRows,
+    aggRowsDeleted: aggRows,
+  };
+}
+
 export function storageStats() {
   const d = D();
   const s = d
@@ -435,7 +499,10 @@ export function storageStats() {
         " (SELECT COUNT(*) FROM batch) batchRows," +
         " (SELECT COUNT(*) FROM position) positions," +
         " (SELECT COUNT(DISTINCT date) FROM fact) detailDates," +
-        " (SELECT COUNT(DISTINCT date) FROM fact_agg) aggDates",
+        " (SELECT COUNT(DISTINCT date) FROM fact_agg) aggDates," +
+        " (SELECT COUNT(*) FROM snapshot WHERE kind='modeled') modeledDates," +
+        " (SELECT MIN(date) FROM snapshot WHERE kind='modeled') modeledFrom," +
+        " (SELECT MAX(date) FROM snapshot WHERE kind='modeled') modeledTo",
     )
     .get() as any;
   const pages = d

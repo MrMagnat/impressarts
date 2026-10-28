@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { api } from "../api";
-import { Loading, useAsync } from "../ui";
+import { ColResizer, Loading, useAsync, useColumnWidths } from "../ui";
 import { TrendArea } from "./charts";
 import CompetitivePanel from "./Competitive";
 import { fmtDate, fmtNum, money, moneyFull, PALETTE, weight } from "../format";
@@ -28,7 +28,7 @@ export default function PositionCard({ id, onClose }: { id: string; onClose: () 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="absolute inset-0 bg-panel/40 backdrop-blur-[1px]" onClick={onClose} />
-      <div className="relative w-full max-w-3xl bg-bg h-full shadow-pop flex flex-col animate-[slidein_.18s_ease]">
+      <div className="relative w-full max-w-6xl bg-bg h-full shadow-pop flex flex-col animate-[slidein_.18s_ease]">
         <style>{`@keyframes slidein{from{transform:translateX(24px);opacity:.4}to{transform:none;opacity:1}}`}</style>
         {loading || !data ? (
           <Loading />
@@ -49,7 +49,16 @@ export default function PositionCard({ id, onClose }: { id: string; onClose: () 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
                 <KPI label="Заморожено" value={money(data.money)} accent="#f59c21" />
                 <KPI label="Остаток" value={weight(data.kg)} accent="#123454" />
-                <KPI label="Цена" value={moneyFull(data.price) + "/кг"} accent="#f25830" />
+                <KPI
+                  label="Цена"
+                  value={moneyFull(data.price) + "/кг"}
+                  accent="#f25830"
+                  hint={
+                    data.kg > 0
+                      ? "заморожено / остаток"
+                      : "модельная цена по виду — остатка нет"
+                  }
+                />
                 <KPI label="Партий" value={fmtNum(data.batchCount)} accent="#00aeef" />
               </div>
             </div>
@@ -86,19 +95,67 @@ export default function PositionCard({ id, onClose }: { id: string; onClose: () 
   );
 }
 
-function KPI({ label, value, accent }: { label: string; value: string; accent: string }) {
+function KPI({
+  label,
+  value,
+  accent,
+  hint,
+}: {
+  label: string;
+  value: string;
+  accent: string;
+  hint?: string;
+}) {
   return (
-    <div className="rounded-lg bg-bg border border-line px-3 py-2">
+    <div className="rounded-lg bg-bg border border-line px-3 py-2" title={hint}>
       <div className="text-[11px] text-ink-mut">{label}</div>
       <div className="font-bold num mt-0.5" style={{ color: accent }}>
         {value}
       </div>
+      {hint && <div className="text-[10px] text-ink-faint leading-tight mt-0.5">{hint}</div>}
     </div>
+  );
+}
+
+/** Колонки таблицы партий: ширины по умолчанию тянутся мышью, см. useColumnWidths. */
+const COLS = [
+  { key: "series", label: "Серия / партия", w: 190 },
+  { key: "kg", label: "Остаток", w: 110, align: "right" as const },
+  { key: "mfd", label: "Изготовлено", w: 120 },
+  { key: "exp", label: "Годен до", w: 120 },
+  { key: "left", label: "Осталось", w: 120, align: "right" as const },
+  { key: "manager", label: "Менеджер", w: 170 },
+  { key: "cp", label: "Контрагент", w: 220 },
+  { key: "money", label: "₽", w: 130, align: "right" as const },
+];
+
+function Cell({
+  children,
+  align = "left",
+  className = "",
+}: {
+  children: React.ReactNode;
+  align?: "left" | "right";
+  className?: string;
+}) {
+  return (
+    <td
+      className={
+        "px-3 py-2 break-words " + (align === "right" ? "text-right " : "") + className
+      }
+    >
+      {children}
+    </td>
   );
 }
 
 function BatchesTab({ data }: { data: any }) {
   const exp = data.expiry.filter((b: any) => b.kg > 0);
+  const { widths, startResize, reset } = useColumnWidths(
+    "position-batches",
+    COLS.map((c) => c.w),
+  );
+  const total = widths.reduce((a, b) => a + b, 0);
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
@@ -116,37 +173,51 @@ function BatchesTab({ data }: { data: any }) {
           </span>
         ))}
       </div>
-      <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="card overflow-x-auto">
+        <table className="text-sm" style={{ width: total, tableLayout: "fixed" }}>
+          <colgroup>
+            {widths.map((w, i) => (
+              <col key={i} style={{ width: w }} />
+            ))}
+          </colgroup>
           <thead>
             <tr className="text-left text-ink-mut text-xs bg-bg/60">
-              <th className="px-3 py-2 font-semibold">Серия / партия</th>
-              <th className="px-3 py-2 font-semibold text-right">Остаток</th>
-              <th className="px-3 py-2 font-semibold">Изготовлено</th>
-              <th className="px-3 py-2 font-semibold">Годен до</th>
-              <th className="px-3 py-2 font-semibold text-right">Осталось</th>
-              <th className="px-3 py-2 font-semibold">Менеджер</th>
-              <th className="px-3 py-2 font-semibold">Контрагент</th>
-              <th className="px-3 py-2 font-semibold text-right">₽</th>
+              {COLS.map((c, i) => (
+                <th
+                  key={c.key}
+                  className={
+                    "px-3 py-2 font-semibold relative " + (c.align === "right" ? "text-right" : "")
+                  }
+                >
+                  <span className="block truncate">{c.label}</span>
+                  {i < COLS.length - 1 && <ColResizer onMouseDown={startResize(i)} />}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {data.batches.map((b: any, i: number) => (
-              <tr key={i} className="border-t border-line/70 hover:bg-bg/50">
-                <td className="px-3 py-2 font-medium">{b.series || "—"}</td>
-                <td className="px-3 py-2 text-right num">{weight(b.kg)}</td>
-                <td className="px-3 py-2 text-ink-mut num">{fmtDate(b.manufactured)}</td>
-                <td className="px-3 py-2 num">{fmtDate(b.best_before)}</td>
-                <td className={"px-3 py-2 text-right num " + daysColor(b.days_left)}>
+              <tr key={i} className="border-t border-line/70 hover:bg-bg/50 align-top">
+                <Cell className="font-medium">{b.series || "—"}</Cell>
+                <Cell align="right" className="num">{weight(b.kg)}</Cell>
+                <Cell className="text-ink-mut num">{fmtDate(b.manufactured)}</Cell>
+                <Cell className="num">{fmtDate(b.best_before)}</Cell>
+                <Cell align="right" className={"num " + daysColor(b.days_left)}>
                   {b.days_left === null ? "—" : b.days_left < 0 ? `просроч. ${-b.days_left}д` : `${b.days_left} дн`}
-                </td>
-                <td className="px-3 py-2 text-ink-soft">{b.manager || "—"}</td>
-                <td className="px-3 py-2 text-ink-soft">{b.counterparty || "—"}</td>
-                <td className="px-3 py-2 text-right num">{money(b.money)}</td>
+                </Cell>
+                <Cell className="text-ink-soft">{b.manager || "—"}</Cell>
+                <Cell className="text-ink-soft">{b.counterparty || "—"}</Cell>
+                <Cell align="right" className="num">{money(b.money)}</Cell>
               </tr>
             ))}
           </tbody>
         </table>
+      </div>
+      <div className="text-xs text-ink-faint flex items-center gap-3">
+        <span>Ширину колонок можно тянуть за границу заголовка — настройка сохраняется.</span>
+        <button className="link" onClick={reset}>
+          Сбросить ширины
+        </button>
       </div>
     </div>
   );

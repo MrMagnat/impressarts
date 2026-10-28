@@ -186,7 +186,7 @@ export function scopeReportHtml(scope: Omit<CompetitiveParams, "dim" | "type">):
   const cp = competitive({ ...base, dim: "counterparty" });
   const mg = competitive({ ...base, dim: "manager" });
 
-  const label = scope.grp ?? scope.vid ?? scope.tip ?? "Все запасы";
+  const label = scope.vid ?? scope.grp ?? scope.tip ?? "Все запасы";
   const hist = sub.scopeHistory;
   const last = hist[hist.length - 1] ?? { money: 0, kg: 0 };
   const prev = hist[hist.length - 2] ?? last;

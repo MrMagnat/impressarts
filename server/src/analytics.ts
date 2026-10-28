@@ -1,5 +1,5 @@
 import { db, currentDate, getSetting } from "./db.js";
-import { round, monthKey } from "./util.js";
+import { round, monthKey, addDays } from "./util.js";
 import { seriesFor, seriesByTip } from "./history.js";
 import { cached } from "./cache.js";
 
@@ -11,15 +11,56 @@ export function snapshotDates(): string[] {
   ).map((r) => r.date);
 }
 
+/**
+ * Шаг сравнения в днях. Снимки из 1С приходят ежедневно, а за сутки остатки
+ * почти не меняются — «прошлый период» по умолчанию отстоит на 4 недели.
+ * Меняется в Настройках → Общие.
+ */
+export function compareOffsetDays(): number {
+  const n = parseInt(getSetting("compare_offset_days", "28"), 10);
+  return Number.isFinite(n) && n > 0 ? n : 28;
+}
+
+/** Снимок, ближайший к `date` минус шаг сравнения (не позже него). */
+function snapshotAtOrBefore(date: string): string | null {
+  const r = D().prepare("SELECT MAX(date) AS d FROM fact_agg WHERE date <= ?").get(date) as {
+    d: string | null;
+  };
+  return r.d;
+}
+
 export function prevDate(date: string): string | null {
+  const back = snapshotAtOrBefore(addDays(date, -compareOffsetDays()));
+  if (back && back < date) return back;
+  // истории на полный шаг назад ещё нет — берём ближайший предыдущий снимок
   const r = D().prepare("SELECT MAX(date) AS d FROM fact_agg WHERE date < ?").get(date) as {
     d: string | null;
   };
   return r.d;
 }
 
-/** Average of the N snapshots strictly before `date`. */
+/**
+ * Опорные точки для среднего: N снимков, отстоящих от `date` на 1..N шагов
+ * сравнения. Раньше здесь брались N подряд идущих дат — на ежедневных данных
+ * это давало «среднее за прошлую неделю», а не за сопоставимые периоды.
+ */
 export function priorDates(date: string, n: number): string[] {
+  const step = compareOffsetDays();
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 1; i <= n; i++) {
+    const d = snapshotAtOrBefore(addDays(date, -step * i));
+    if (!d || d >= date || seen.has(d)) continue;
+    seen.add(d);
+    out.push(d);
+  }
+  if (out.length) return out;
+  // короткая история: откатываемся к подряд идущим снимкам
+  return recentDates(date, n);
+}
+
+/** N подряд идущих снимков до `date` — окно для графиков, а не для сравнения. */
+export function recentDates(date: string, n: number): string[] {
   return (
     D()
       .prepare("SELECT DISTINCT date FROM fact_agg WHERE date < ? ORDER BY date DESC LIMIT ?")
@@ -100,27 +141,28 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
   const where: string[] = ["f.date = @cur"];
   const bind: Record<string, any> = { cur };
 
-  // Иерархия: Тип -> Группа -> Позиция -> Партии (в карточке позиции).
-  // «Вид номенклатуры» остаётся в модели данных (к нему привязана цена ₽/кг),
-  // но из навигации убран — группы собираются по всем видам внутри типа.
+  // Иерархия: Тип (TypeN_Name) -> Вид (Parents) -> Позиция -> Партии.
+  // «Группа» (префикс имени до двоеточия) из навигации убрана: у реальной
+  // выгрузки двоеточия нет у большинства позиций, и уровень вырождался в
+  // одну «Без группы». Поле grp остаётся в модели для старых отчётов.
   if (!tip) {
     level = "tip";
     groupCol = "p.tip";
-  } else if (!grp) {
-    level = "grp";
-    groupCol = "p.grp";
+  } else if (!vid) {
+    level = "vid";
+    groupCol = "p.vid";
     where.push("p.tip = @tip");
     bind.tip = tip;
   } else {
     level = "position";
     groupCol = "p.position_id";
-    where.push("p.tip = @tip AND p.grp = @grp");
+    where.push("p.tip = @tip AND p.vid = @vid");
     bind.tip = tip;
-    bind.grp = grp;
-  }
-  if (vid) {
-    where.push("p.vid = @vid");
     bind.vid = vid;
+  }
+  if (grp) {
+    where.push("p.grp = @grp");
+    bind.grp = grp;
   }
 
   // Уровни «тип» и «группа» целиком покрываются агрегатом — джойн детальных
@@ -135,13 +177,13 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
          FROM fact_agg WHERE date = @cur AND level = 'tip' ORDER BY money DESC`,
       )
       .all({ cur }) as any[];
-  } else if (level === "grp") {
+  } else if (level === "vid") {
     rows = D()
       .prepare(
-        `SELECT k3 AS key, k3 AS label, k1 AS tip, MIN(k2) AS vid,
-                SUM(kg) AS kg, SUM(money) AS money, SUM(positions) AS positions
-         FROM fact_agg WHERE date = @cur AND level = 'grp' AND k1 = @tip
-         GROUP BY k3 ORDER BY money DESC`,
+        `SELECT k2 AS key, k2 AS label, k1 AS tip, k2 AS vid,
+                kg, money, positions
+         FROM fact_agg WHERE date = @cur AND level = 'vid' AND k1 = @tip
+         ORDER BY money DESC`,
       )
       .all({ cur, tip } as any) as any[];
   } else {
@@ -166,9 +208,9 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
     for (const r of D()
       .prepare(
         `SELECT position_id AS id, COUNT(*) AS c FROM batch WHERE date=@cur AND position_id IN
-         (SELECT position_id FROM position WHERE tip=@tip AND grp=@grp) GROUP BY position_id`,
+         (SELECT position_id FROM position WHERE tip=@tip AND vid=@vid) GROUP BY position_id`,
       )
-      .all({ cur, tip, grp } as any) as { id: string; c: number }[]) {
+      .all({ cur, tip, vid } as any) as { id: string; c: number }[]) {
       batchCounts.set(r.id, r.c);
     }
   }
@@ -178,8 +220,8 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
     key: String(r.key),
     label: String(r.label),
     tip: r.tip,
-    vid: level === "tip" ? undefined : r.vid ?? vid,
-    grp: level === "grp" ? String(r.key) : grp,
+    vid: level === "tip" ? undefined : level === "vid" ? String(r.key) : r.vid ?? vid,
+    grp,
     kg: round(r.kg, 1),
     money: round(r.money),
     positions: r.positions,
@@ -192,7 +234,7 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
     (a, c) => ({ kg: a.kg + c.kg, money: a.money + c.money }),
     { kg: 0, money: 0 },
   );
-  const label = grp ?? vid ?? tip ?? "Все запасы";
+  const label = vid ?? grp ?? tip ?? "Все запасы";
   return {
     parent: { level, label, kg: round(pTotal.kg, 1), money: round(pTotal.money) },
     children,
@@ -212,7 +254,7 @@ function buildPositionCard(id: string) {
     .get(id) as any;
   if (!pos) return null;
 
-  const price = (
+  const listPrice = (
     D().prepare("SELECT price_per_kg FROM price WHERE vid = ?").get(pos.vid) as
       | { price_per_kg: number }
       | undefined
@@ -221,6 +263,11 @@ function buildPositionCard(id: string) {
   const totals = D()
     .prepare("SELECT kg, money FROM fact WHERE date=? AND position_id=?")
     .get(cur, id) as { kg: number; money: number } | undefined;
+
+  // Цена в карточке — обратный счёт по факту: заморожено / остаток. Модельная
+  // цена ₽/кг из таблицы price остаётся запасной для позиций без остатка.
+  const price =
+    totals && totals.kg > 0 ? round(totals.money / totals.kg, 2) : listPrice;
 
   const batches = D()
     .prepare(
@@ -251,6 +298,7 @@ function buildPositionCard(id: string) {
     id,
     ...pos,
     price,
+    listPrice,
     kg: round(totals?.kg ?? 0, 1),
     money: round(totals?.money ?? 0),
     batchCount: batches.length,
@@ -427,13 +475,13 @@ function buildDashboard() {
   const topVids = D()
     .prepare(
       `SELECT k1 AS tip, k2 AS vid, kg, money FROM fact_agg
-       WHERE date=? AND level='vid' ORDER BY money DESC LIMIT 10`,
+       WHERE date=? AND level='vid' ORDER BY money DESC LIMIT 20`,
     )
     .all(cur)
     .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
 
   // тренд за 26 точек назад — из агрегата, поэтому не зависит от глубины детали
-  const trend = seriesFor({}, priorDates(cur, 26).slice(-1)[0] ?? cur);
+  const trend = seriesFor({}, recentDates(cur, 26).slice(-1)[0] ?? cur);
 
 
   return {
@@ -462,7 +510,7 @@ function buildDashboard() {
     topManagers: topDim("manager"),
     topCounterparties: topDim("counterparty"),
     // разложение тренда по типам — для графика с накоплением
-    trendByTip: seriesByTip(priorDates(cur, 26).slice(-1)[0] ?? cur),
+    trendByTip: seriesByTip(recentDates(cur, 26).slice(-1)[0] ?? cur),
     tips: byTip.map((t: any) => t.tip),
   };
 }

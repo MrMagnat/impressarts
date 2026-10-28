@@ -138,6 +138,17 @@ export function initSchema(): void {
       sample        TEXT                  -- начало сырого ответа, для диагностики
     );
     CREATE INDEX IF NOT EXISTS ix_synclog_at ON sync_log(started_at DESC);
+
+    -- Журнал ошибок приложения: отчёты, PDF, импорт. Кольцевой, см. applog.ts.
+    CREATE TABLE IF NOT EXISTS app_log (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      at      TEXT NOT NULL,          -- ISO, реальное время
+      level   TEXT NOT NULL,          -- 'error' | 'warn' | 'info'
+      source  TEXT NOT NULL,          -- маршрут или подсистема
+      message TEXT NOT NULL,
+      detail  TEXT                    -- стектрейс и контекст
+    );
+    CREATE INDEX IF NOT EXISTS ix_applog_at ON app_log(id DESC);
   `);
 
   // Индексы под реальный объём: без них выборки по дате идут полным перебором

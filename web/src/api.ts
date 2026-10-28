@@ -88,7 +88,10 @@ export interface PositionCard {
   vid: string;
   grp: string;
   name: string;
+  /** ₽/кг обратным счётом: заморожено / остаток. */
   price: number;
+  /** Модельная цена ₽/кг по виду из Настроек — для сверки. */
+  listPrice: number;
   kg: number;
   money: number;
   batchCount: number;
@@ -231,6 +234,8 @@ export interface PriceRow {
 export interface GeneralSettings {
   currency: string;
   expiryWarnDays: number;
+  /** Шаг сравнения «прошлый период», дней. */
+  compareOffsetDays: number;
   currentDate: string;
   passwordSet: boolean;
   uploads: string[];
@@ -287,9 +292,17 @@ export interface ExpiryRow {
   noDateKg: number;
   items: ExpiryBatch[];
 }
+export type ExpirySort = "nearest" | "kg" | "money" | "batches" | "name";
+
 export interface ExpiryReport {
   date: string;
-  filter: { tip: string | null; bucket: string | null; withinDays: number | null };
+  filter: {
+    tip: string | null;
+    bucket: string | null;
+    withinDays: number | null;
+    sort: ExpirySort;
+    dir: "asc" | "desc";
+  };
   buckets: ExpiryBucket[];
   tips: string[];
   totals: { positions: number; kg: number; money: number; batches: number; overdueKg: number };
@@ -387,6 +400,28 @@ export interface StorageStats {
   months: number;
   dbBytes: number;
   retentionDays: number;
+  /** Смоделированные (не реальные) точки истории. */
+  modeledDates: number;
+  modeledFrom: string | null;
+  modeledTo: string | null;
+}
+
+export interface PurgeResult {
+  dates: string[];
+  from: string | null;
+  to: string | null;
+  factRowsDeleted: number;
+  aggRowsDeleted: number;
+  stats: StorageStats;
+}
+
+export interface AppLogRow {
+  id: number;
+  at: string;
+  level: "error" | "warn" | "info";
+  source: string;
+  message: string;
+  detail: string | null;
 }
 export interface BackfillResult {
   requested: string[];
@@ -455,12 +490,23 @@ export const api = {
     if (p.grp) q.set("grp", p.grp);
     return req<Competitive>("/api/reports/competitive?" + q.toString());
   },
-  expiryReport: (p: { tip?: string; bucket?: string; withinDays?: number; limit?: number } = {}) => {
+  expiryReport: (
+    p: {
+      tip?: string;
+      bucket?: string;
+      withinDays?: number;
+      limit?: number;
+      sort?: ExpirySort;
+      dir?: "asc" | "desc";
+    } = {},
+  ) => {
     const q = new URLSearchParams();
     if (p.tip) q.set("tip", p.tip);
     if (p.bucket) q.set("bucket", p.bucket);
     if (p.withinDays != null) q.set("withinDays", String(p.withinDays));
     if (p.limit != null) q.set("limit", String(p.limit));
+    if (p.sort) q.set("sort", p.sort);
+    if (p.dir) q.set("dir", p.dir);
     return req<ExpiryReport>("/api/reports/expiry?" + q.toString());
   },
   expiryPdfUrl: (p: { tip?: string; bucket?: string; withinDays?: number } = {}) => {
@@ -488,7 +534,14 @@ export const api = {
       body: JSON.stringify({ prices }),
     }),
   general: () => req<GeneralSettings>("/api/settings/general"),
-  saveGeneral: (b: Partial<{ currency: string; expiryWarnDays: number; password: string }>) =>
+  saveGeneral: (
+    b: Partial<{
+      currency: string;
+      expiryWarnDays: number;
+      compareOffsetDays: number;
+      password: string;
+    }>,
+  ) =>
     req<{ ok: boolean }>("/api/settings/general", { method: "PUT", body: JSON.stringify(b) }),
 
   // источник 1С
@@ -513,4 +566,10 @@ export const api = {
     ),
   storageBackfill: (b: { from: string; to: string; step?: "day" | "week" | "month"; maxPoints?: number }) =>
     req<BackfillResult>("/api/storage/backfill", { method: "POST", body: JSON.stringify(b) }),
+  storagePurgeModeled: () =>
+    req<PurgeResult>("/api/storage/purge-modeled", { method: "POST", body: "{}" }),
+
+  // журнал ошибок приложения
+  appLog: (limit = 100) => req<AppLogRow[]>("/api/logs?limit=" + limit),
+  appLogClear: () => req<{ ok: boolean; deleted: number }>("/api/logs/clear", { method: "POST", body: "{}" }),
 };

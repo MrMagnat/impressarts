@@ -3,6 +3,7 @@ import { api, PriceRow } from "../api";
 import { Card, Loading, Spinner, useAsync } from "../ui";
 import SourceTab from "./SourceTab";
 import StorageTab from "./StorageTab";
+import LogsTab from "./LogsTab";
 import { fmtDate, money, moneyFull, weight } from "../format";
 
 const TABS = [
@@ -10,6 +11,7 @@ const TABS = [
   { k: "prices", label: "Цены (₽/кг)" },
   { k: "import", label: "Импорт файлом" },
   { k: "storage", label: "Хранение" },
+  { k: "logs", label: "Журнал ошибок" },
   { k: "general", label: "Общие" },
 ] as const;
 type Tab = (typeof TABS)[number]["k"];
@@ -37,6 +39,7 @@ export default function Settings() {
       {tab === "prices" && <Prices />}
       {tab === "import" && <Import />}
       {tab === "storage" && <StorageTab />}
+      {tab === "logs" && <LogsTab />}
       {tab === "general" && <General />}
     </div>
   );
@@ -148,7 +151,15 @@ function Import() {
       const res = await fetch("/api/settings/import", { method: "POST", body: fd, credentials: "same-origin" });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "Ошибка импорта");
-      setMsg({ ok: true, text: `Загружено: снимок на ${fmtDate(j.date)}, позиций ${j.positions}, строк ${j.rows}.` });
+      const purged = j.purgedModeled
+        ? ` Удалена смоделированная история: ${j.purgedModeled} точек (${fmtDate(j.purgedFrom)} — ${fmtDate(j.purgedTo)}).`
+        : "";
+      setMsg({
+        ok: true,
+        text:
+          `Загружено: снимок на ${fmtDate(j.date)}, позиций ${j.positions}, строк ${j.rows}.` +
+          purged,
+      });
       reload();
     } catch (e: any) {
       setMsg({ ok: false, text: e?.message ?? "Ошибка" });
@@ -164,6 +175,8 @@ function Import() {
         <p className="text-sm text-ink-mut mb-4">
           Excel-файл в формате выгрузки остатков (колонки: Дата, Номенклатура, Вид, Тип, Серия, ОстатокКГ,
           Годен до, Дата изготовления, Менеджер, Заказчик). Файл станет актуальным снимком.
+          Смоделированная история, если она ещё осталась в базе, при этом удаляется — реальные
+          снимки не трогаются.
         </p>
         <label className={"btn-primary cursor-pointer " + (busy ? "opacity-60 pointer-events-none" : "")}>
           {busy ? <Spinner className="!border-white/40 !border-t-white" /> : "Выбрать .xlsx файл"}
@@ -202,6 +215,7 @@ function General() {
   const { data, loading, reload } = useAsync(() => api.general(), []);
   const [currency, setCurrency] = useState("₽");
   const [expiry, setExpiry] = useState(60);
+  const [compare, setCompare] = useState(28);
   const [pw, setPw] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -210,6 +224,7 @@ function General() {
     if (data) {
       setCurrency(data.currency);
       setExpiry(data.expiryWarnDays);
+      setCompare(data.compareOffsetDays ?? 28);
     }
   }, [data]);
 
@@ -218,7 +233,12 @@ function General() {
   const save = async () => {
     setSaving(true);
     setSaved(false);
-    await api.saveGeneral({ currency, expiryWarnDays: expiry, password: pw || undefined });
+    await api.saveGeneral({
+      currency,
+      expiryWarnDays: expiry,
+      compareOffsetDays: compare,
+      password: pw || undefined,
+    });
     setPw("");
     setSaving(false);
     setSaved(true);
@@ -233,6 +253,21 @@ function General() {
         </Field>
         <Field label="Порог предупреждения о годности (дней)">
           <input type="number" value={expiry} onChange={(e) => setExpiry(Number(e.target.value))} className="inp" />
+        </Field>
+        <Field label="Прошлый период для сравнения, дней">
+          <input
+            type="number"
+            min={1}
+            max={365}
+            value={compare}
+            onChange={(e) => setCompare(Number(e.target.value))}
+            className="inp"
+          />
+          <div className="text-xs text-ink-faint mt-1">
+            Насколько далеко назад отсчитывается «прошлый период» на дашборде и в недельных
+            отчётах. Снимки из 1С приходят ежедневно, а за сутки остатки почти не меняются —
+            по умолчанию 28 дней.
+          </div>
         </Field>
         <Field label="Новый пароль доступа (оставьте пустым, чтобы не менять)">
           <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="••••••" className="inp" />

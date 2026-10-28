@@ -3,7 +3,7 @@ import { api } from "../api";
 import { Link } from "react-router-dom";
 import { Card, DeltaBadge, ErrorBox, Loading, Spinner, useAsync } from "../ui";
 import { Donut, HBars, StackedTrend, TrendArea } from "../components/charts";
-import { fmtDate, fmtNum, money, moneyFull, PALETTE, pct, TIP_COLORS, weight } from "../format";
+import { fmtDate, fmtNum, money, moneyFull, PALETTE, pct, tipColors, weight } from "../format";
 
 function Stat({
   label,
@@ -46,6 +46,8 @@ export default function Dashboard() {
   const [stacked, setStacked] = useState(true);
   // фильтр по типу для блоков, которые считаются по партиям текущего снимка
   const [tipFilter, setTipFilter] = useState<string>("");
+  // в топе категорий клиенту нужно видеть не меньше десяти строк
+  const [vidLimit, setVidLimit] = useState(12);
   const bd = useAsync(() => api.breakdown(tipFilter || undefined), [tipFilter]);
 
   if (loading) return <Loading />;
@@ -53,15 +55,17 @@ export default function Dashboard() {
   if (!data) return null;
 
   const d = data;
+  // цвета считаются по фактическому списку типов, а не по словарю на три
+  // захардкоженных названия — иначе всё, кроме них, красилось одним цветом
+  const TIP_COLORS = tipColors(d.tips ?? d.byTip.map((t) => t.tip));
   const tipData = d.byTip.map((t) => ({
     label: t.tip,
     value: metric === "money" ? t.money : t.kg,
-    color: TIP_COLORS[t.tip] ?? "#f59c21",
+    color: TIP_COLORS[t.tip],
   }));
-  const vidData = d.topVids.slice(0, 8).map((v) => ({
-    label: v.vid,
-    value: metric === "money" ? v.money : v.kg,
-  }));
+  const vidData = d.topVids
+    .slice(0, vidLimit)
+    .map((v) => ({ label: v.vid, value: metric === "money" ? v.money : v.kg }));
   // пока разрез не подгрузился, показываем общие цифры из дашборда
   const cut = bd.data ?? { expiry: d.expiry, topManagers: d.topManagers, topCounterparties: d.topCounterparties };
   const expiryActive = cut.expiry.filter((b) => b.kg > 0);
@@ -143,7 +147,7 @@ export default function Dashboard() {
               <div className="flex items-center gap-4 flex-wrap mt-2 pl-1">
                 {tips.map((t) => (
                   <span key={t} className="flex items-center gap-1.5 text-xs text-ink-mut">
-                    <span className="w-2.5 h-2.5 rounded-sm" style={{ background: TIP_COLORS[t] ?? "#f59c21" }} />
+                    <span className="w-2.5 h-2.5 rounded-sm" style={{ background: TIP_COLORS[t] }} />
                     {t}
                   </span>
                 ))}
@@ -158,7 +162,7 @@ export default function Dashboard() {
           <div className="mt-3 space-y-1.5">
             {d.byTip.map((t) => (
               <div key={t.tip} className="flex items-center gap-2 text-sm">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ background: TIP_COLORS[t.tip] ?? "#f59c21" }} />
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: TIP_COLORS[t.tip] }} />
                 <span className="flex-1 truncate text-ink-soft">{t.tip}</span>
                 <span className="num font-semibold">{metric === "money" ? money(t.money) : weight(t.kg)}</span>
               </div>
@@ -181,8 +185,21 @@ export default function Dashboard() {
 
       {/* vids + expiry */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Card className="p-4" title="Топ категорий (вид номенклатуры)">
-          <HBars data={vidData} metric={metric} height={260} />
+        <Card
+          className="p-4"
+          title="Топ категорий (вид номенклатуры)"
+          right={
+            d.topVids.length > 12 ? (
+              <button
+                className="text-xs text-brand-600 font-medium hover:underline"
+                onClick={() => setVidLimit((n) => (n > 12 ? 12 : d.topVids.length))}
+              >
+                {vidLimit > 12 ? "Показать 12" : `Показать все ${d.topVids.length}`}
+              </button>
+            ) : null
+          }
+        >
+          <HBars data={vidData} metric={metric} height={Math.max(260, vidData.length * 26)} />
         </Card>
         <Card className="p-4" title={"Сроки годности партий" + (tipFilter ? " · " + tipFilter : "")}>
           <div className="space-y-2.5 mt-1">

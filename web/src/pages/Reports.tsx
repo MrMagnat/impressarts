@@ -3,7 +3,7 @@ import { api, ScopeReport, ScopeChild } from "../api";
 import { Card, DeltaBadge, ErrorBox, Loading, useAsync } from "../ui";
 import { TrendArea } from "../components/charts";
 import CompetitivePanel from "../components/Competitive";
-import { fmtDate, money, pct, TIP_COLORS, weight } from "../format";
+import { fmtDate, money, pct, tipColors, weight } from "../format";
 
 interface Scope {
   tip?: string;
@@ -29,18 +29,18 @@ export default function Reports() {
       ? (weeks.data ?? []).map((d) => ({ value: d, label: "Неделя от " + fmtDate(d) }))
       : (months.data ?? []).map((m) => ({ value: m.month, label: m.month }));
 
-  // Иерархия отчётов повторяет каталог: Тип -> Группа -> Позиция.
+  // Иерархия отчётов повторяет каталог: Тип -> Вид номенклатуры -> Позиция.
   const crumbs = useMemo(() => {
     const arr: { label: string; go: Scope }[] = [{ label: "Все данные", go: {} }];
     if (scope.tip) arr.push({ label: scope.tip, go: { tip: scope.tip } });
-    if (scope.grp) arr.push({ label: scope.grp, go: { tip: scope.tip, grp: scope.grp } });
+    if (scope.vid) arr.push({ label: scope.vid, go: { tip: scope.tip, vid: scope.vid } });
     return arr;
   }, [scope]);
 
   const drill = (c: ScopeChild) => {
     if (!c.hasChildren) return;
     if (!scope.tip) setScope({ tip: c.key });
-    else if (!scope.grp) setScope({ tip: scope.tip, grp: c.key });
+    else if (!scope.vid) setScope({ tip: scope.tip, vid: c.key });
   };
 
   const pdfHref = scope.tip
@@ -132,7 +132,13 @@ function ReportBody({
   const periodName =
     r.kind === "weekly" ? `неделя от ${fmtDate(r.target)}` : `месяц ${r.targetMonth}`;
   const prevName = r.kind === "weekly" ? fmtDate(r.prevDate) : "пред. месяц";
-  const avgName = r.kind === "weekly" ? `${r.avgCount} нед.` : `${r.avgCount} мес.`;
+  const avgName = r.kind === "weekly" ? `${r.avgCount} периодов` : `${r.avgCount} мес.`;
+  // цвета типов — по фактическому списку; и здесь, и на дашборде он
+  // отсортирован по «заморожено», поэтому цвета на страницах совпадают
+  const tipMap = useMemo(
+    () => tipColors(r.children.filter((c) => c.level === "tip").map((c) => c.label)),
+    [r.children],
+  );
 
   return (
     <div className="space-y-5">
@@ -221,7 +227,7 @@ function ReportBody({
                       {c.level === "tip" && (
                         <span
                           className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle"
-                          style={{ background: TIP_COLORS[c.label] ?? "#f59c21" }}
+                          style={{ background: tipMap[c.label] }}
                         />
                       )}
                       <span className="align-middle">{c.label}</span>

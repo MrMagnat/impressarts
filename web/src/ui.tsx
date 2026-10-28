@@ -128,6 +128,93 @@ export function Chip({
   );
 }
 
+/**
+ * Ширины колонок таблицы, которые можно тянуть мышью за границу заголовка.
+ *
+ * Нужно там, где содержимое непредсказуемой длины — серии, названия
+ * контрагентов, имена менеджеров: фиксированные доли либо режут текст, либо
+ * растягивают таблицу за край панели. Ширины живут в localStorage по ключу,
+ * поэтому настройка переживает перезагрузку.
+ */
+export function useColumnWidths(key: string, initial: number[]) {
+  const [widths, setWidths] = useState<number[]>(() => {
+    try {
+      const raw = localStorage.getItem("colw:" + key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length === initial.length) return parsed;
+      }
+    } catch {
+      /* приватный режим — просто начинаем с умолчаний */
+    }
+    return initial;
+  });
+
+  const drag = useRef<{ i: number; x: number; w: number } | null>(null);
+
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const d = drag.current;
+      if (!d) return;
+      e.preventDefault();
+      setWidths((ws) => {
+        const next = [...ws];
+        next[d.i] = Math.max(56, Math.round(d.w + (e.clientX - d.x)));
+        return next;
+      });
+    };
+    const up = () => {
+      if (!drag.current) return;
+      drag.current = null;
+      document.body.style.cursor = "";
+      setWidths((ws) => {
+        try {
+          localStorage.setItem("colw:" + key, JSON.stringify(ws));
+        } catch {
+          /* не критично */
+        }
+        return ws;
+      });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [key]);
+
+  const startResize = (i: number) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    drag.current = { i, x: e.clientX, w: widths[i] };
+    document.body.style.cursor = "col-resize";
+  };
+
+  const reset = () => {
+    setWidths(initial);
+    try {
+      localStorage.removeItem("colw:" + key);
+    } catch {
+      /* не критично */
+    }
+  };
+
+  return { widths, startResize, reset };
+}
+
+/** Невидимая полоска на правой границе заголовка — за неё тянут ширину. */
+export function ColResizer({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+  return (
+    <span
+      onMouseDown={onMouseDown}
+      onClick={(e) => e.stopPropagation()}
+      title="Потяните, чтобы изменить ширину"
+      className="absolute top-0 right-0 h-full w-2 cursor-col-resize select-none hover:bg-brand-300/60"
+    />
+  );
+}
+
 export function Empty({ children }: { children: React.ReactNode }) {
   return <div className="py-10 text-center text-ink-faint text-sm">{children}</div>;
 }

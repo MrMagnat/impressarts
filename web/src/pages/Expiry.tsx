@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api, ExpiryRow } from "../api";
+import { api, ExpiryRow, ExpirySort } from "../api";
 import { Card, ErrorBox, Loading, useAsync } from "../ui";
-import { fmtDate, fmtNum, money, TIP_COLORS, weight } from "../format";
+import { fmtDate, fmtNum, money, tipColors, weight } from "../format";
 
 const BUCKET_COLORS: Record<string, string> = {
   overdue: "#d63b3b",
@@ -25,12 +25,33 @@ export default function Expiry() {
   const [params, setParams] = useSearchParams();
   const tip = params.get("tip") ?? "";
   const bucket = params.get("bucket") ?? "";
+  const sort = (params.get("sort") ?? "nearest") as ExpirySort;
+  const dir = (params.get("dir") ?? (sort === "nearest" ? "asc" : "desc")) as "asc" | "desc";
   const [open, setOpen] = useState<Set<string>>(new Set());
 
   const { data, loading, error } = useAsync(
-    () => api.expiryReport({ tip: tip || undefined, bucket: bucket || undefined, limit: 300 }),
-    [tip, bucket],
+    () =>
+      api.expiryReport({
+        tip: tip || undefined,
+        bucket: bucket || undefined,
+        sort,
+        dir,
+        limit: 300,
+      }),
+    [tip, bucket, sort, dir],
   );
+
+  /** Клик по заголовку: та же колонка — разворот, другая — её порядок по умолчанию. */
+  const sortBy = (col: ExpirySort) => {
+    const next = new URLSearchParams(params);
+    if (col === sort) {
+      next.set("dir", dir === "asc" ? "desc" : "asc");
+    } else {
+      next.set("dir", col === "nearest" || col === "name" ? "asc" : "desc");
+    }
+    next.set("sort", col);
+    setParams(next, { replace: true });
+  };
 
   const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(params);
@@ -50,6 +71,7 @@ export default function Expiry() {
   if (error) return <ErrorBox msg={error} />;
   if (!data) return null;
 
+  const colors = tipColors(data.tips);
   const active = data.buckets.filter((b) => b.batches > 0);
   const maxKg = Math.max(...active.map((b) => b.kg), 1);
 
@@ -93,7 +115,7 @@ export default function Expiry() {
             <Chip
               key={t}
               label={t}
-              color={TIP_COLORS[t]}
+              color={colors[t]}
               active={tip === t}
               onClick={() => setFilter("tip", t)}
             />
@@ -144,19 +166,25 @@ export default function Expiry() {
       {/* детализация */}
       <Card
         title={`Детализация по номенклатуре · ${data.rows.length} позиций`}
-        right={<span className="text-xs text-ink-faint">отсортировано по ближайшему сроку</span>}
+        right={
+          <span className="text-xs text-ink-faint">
+            {bucket
+              ? "в раскрытии — только серии выбранного срока"
+              : "щёлкните по заголовку, чтобы отсортировать"}
+          </span>
+        }
         className="overflow-hidden"
       >
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-ink-mut text-xs bg-bg/60">
-              <th className="px-4 py-2.5 font-semibold">Номенклатура</th>
-              <th className="px-4 py-2.5 font-semibold w-44">Тип / группа</th>
-              <th className="px-4 py-2.5 font-semibold w-28">Годен до</th>
+              <SortTh col="name" sort={sort} dir={dir} onSort={sortBy}>Номенклатура</SortTh>
+              <th className="px-4 py-2.5 font-semibold w-44">Тип / вид</th>
+              <SortTh col="nearest" sort={sort} dir={dir} onSort={sortBy} className="w-28">Годен до</SortTh>
               <th className="px-4 py-2.5 font-semibold w-32">Осталось</th>
-              <th className="px-4 py-2.5 font-semibold text-right w-24">Остаток</th>
-              <th className="px-4 py-2.5 font-semibold text-right w-28">Заморожено</th>
-              <th className="px-4 py-2.5 font-semibold text-right w-20">Партий</th>
+              <SortTh col="kg" sort={sort} dir={dir} onSort={sortBy} align="right" className="w-24">Остаток</SortTh>
+              <SortTh col="money" sort={sort} dir={dir} onSort={sortBy} align="right" className="w-28">Заморожено</SortTh>
+              <SortTh col="batches" sort={sort} dir={dir} onSort={sortBy} align="right" className="w-20">Партий</SortTh>
             </tr>
           </thead>
           <tbody>
@@ -168,7 +196,13 @@ export default function Expiry() {
               </tr>
             )}
             {data.rows.map((r) => (
-              <Row key={r.id} row={r} open={open.has(r.id)} onToggle={() => toggle(r.id)} />
+              <Row
+                key={r.id}
+                row={r}
+                colors={colors}
+                open={open.has(r.id)}
+                onToggle={() => toggle(r.id)}
+              />
             ))}
           </tbody>
         </table>
@@ -189,7 +223,17 @@ export default function Expiry() {
   );
 }
 
-function Row({ row, open, onToggle }: { row: ExpiryRow; open: boolean; onToggle: () => void }) {
+function Row({
+  row,
+  colors,
+  open,
+  onToggle,
+}: {
+  row: ExpiryRow;
+  colors: Record<string, string>;
+  open: boolean;
+  onToggle: () => void;
+}) {
   return (
     <>
       <tr
@@ -204,8 +248,8 @@ function Row({ row, open, onToggle }: { row: ExpiryRow; open: boolean; onToggle:
           <span className="align-middle">{row.name}</span>
         </td>
         <td className="px-4 py-2.5 text-xs text-ink-mut">
-          <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ background: TIP_COLORS[row.tip] ?? "#f59c21" }} />
-          {row.tip} · {row.grp}
+          <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ background: colors[row.tip] }} />
+          {row.tip} · {row.vid}
         </td>
         <td className="px-4 py-2.5 num">{row.nearest ? fmtDate(row.nearest) : "—"}</td>
         <td className="px-4 py-2.5"><DaysLeft days={row.daysLeft} /></td>
@@ -228,6 +272,46 @@ function Row({ row, open, onToggle }: { row: ExpiryRow; open: boolean; onToggle:
           </tr>
         ))}
     </>
+  );
+}
+
+/**
+ * Заголовок-кнопка сортировки. Сортирует сервер, а не браузер: в таблицу
+ * попадают первые 300 позиций по выбранному порядку, иначе на реальном объёме
+ * «топ по заморожено» показывал бы топ внутри случайной выборки.
+ */
+function SortTh({
+  col,
+  sort,
+  dir,
+  onSort,
+  align = "left",
+  className = "",
+  children,
+}: {
+  col: ExpirySort;
+  sort: ExpirySort;
+  dir: "asc" | "desc";
+  onSort: (c: ExpirySort) => void;
+  align?: "left" | "right";
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const on = sort === col;
+  return (
+    <th className={"px-4 py-2.5 font-semibold " + (align === "right" ? "text-right " : "") + className}>
+      <button
+        onClick={() => onSort(col)}
+        className={
+          "inline-flex items-center gap-1 hover:text-ink transition " + (on ? "text-brand-600" : "")
+        }
+      >
+        {children}
+        <span className={on ? "" : "opacity-0 group-hover:opacity-40"}>
+          {on ? (dir === "asc" ? "▲" : "▼") : "▲"}
+        </span>
+      </button>
+    </th>
   );
 }
 

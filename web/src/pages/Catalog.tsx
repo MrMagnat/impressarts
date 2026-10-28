@@ -18,7 +18,10 @@ const LEVEL_LABEL: Record<string, string> = {
   position: "Позиция",
 };
 
-// Иерархия каталога: Тип -> Группа -> Позиция -> Партии (в карточке позиции).
+// Доля колонки с названием: на реальных данных имена материалов длинные
+// («… ширина 1200 …»), и обрезка по max-w-md съедала самую важную часть.
+
+// Иерархия каталога: Тип (TypeN_Name) -> Вид (Parents) -> Позиция -> Партии.
 
 export default function Catalog() {
   const [path, setPath] = useState<Path>({});
@@ -46,7 +49,7 @@ export default function Catalog() {
   const crumbs = useMemo(() => {
     const arr: { label: string; go: Path }[] = [{ label: "Все запасы", go: {} }];
     if (path.tip) arr.push({ label: path.tip, go: { tip: path.tip } });
-    if (path.grp) arr.push({ label: path.grp, go: { tip: path.tip, grp: path.grp } });
+    if (path.vid) arr.push({ label: path.vid, go: { tip: path.tip, vid: path.vid } });
     return arr;
   }, [path]);
 
@@ -56,7 +59,7 @@ export default function Catalog() {
       return;
     }
     if (n.level === "tip") setPath({ tip: n.key });
-    else if (n.level === "grp") setPath({ tip: path.tip, grp: n.key });
+    else if (n.level === "vid") setPath({ tip: path.tip, vid: n.key });
   };
 
   const canCompete = !!path.tip; // competitive available once inside a type
@@ -66,7 +69,7 @@ export default function Catalog() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold">Каталог складских запасов</h1>
-          <p className="text-ink-mut text-sm">Дерево: тип → группа → позиция → партии</p>
+          <p className="text-ink-mut text-sm">Дерево: тип → вид номенклатуры → позиция → партии</p>
         </div>
         <div className="relative">
           <input
@@ -89,7 +92,7 @@ export default function Catalog() {
                   }}
                   className="w-full text-left px-4 py-2.5 hover:bg-bg border-b border-line/60 last:border-0"
                 >
-                  <div className="text-sm font-medium truncate">{r.name}</div>
+                  <div className="text-sm font-medium break-words leading-snug">{r.name}</div>
                   <div className="text-xs text-ink-mut flex justify-between">
                     <span>{r.tip} · {r.vid}</span>
                     <span className="num">{money(r.money)}</span>
@@ -139,7 +142,7 @@ export default function Catalog() {
             tip: path.tip,
             vid: path.vid,
             grp: path.grp,
-            label: path.grp ?? path.vid ?? path.tip ?? "",
+            label: path.vid ?? path.grp ?? path.tip ?? "",
           }}
         />
       )}
@@ -169,8 +172,10 @@ export default function Catalog() {
                   onClick={() => drill(n)}
                   className="border-t border-line/70 hover:bg-brand-50/40 cursor-pointer"
                 >
-                  <td className="px-4 py-2.5 font-medium max-w-md">
-                    <div className="truncate">{n.label}</div>
+                  <td className="px-4 py-2.5 font-medium">
+                    <div className="break-words leading-snug" title={n.label}>
+                      {n.label}
+                    </div>
                     {n.level === "position" && (
                       <div className="text-xs text-ink-faint">{n.batches} партий</div>
                     )}

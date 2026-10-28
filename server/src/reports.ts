@@ -196,10 +196,14 @@ export interface ScopeSel {
   grp?: string;
 }
 
-/** Child grouping column + level for a scope in the tree Тип→Группа→Позиция. */
+/**
+ * Уровень потомков для среза в дереве Тип→Вид→Позиция.
+ * Группировка идёт по виду номенклатуры (поле Parents из 1С), а не по «группе»
+ * из префикса имени: в реальной выгрузке префикса нет у большинства позиций.
+ */
 function reportChild(s: ScopeSel): { col: string; level: string; label: string } | null {
   if (!s.tip) return { col: "p.tip", level: "tip", label: "Тип номенклатуры" };
-  if (!s.grp) return { col: "p.grp", level: "grp", label: "Группа" };
+  if (!s.vid && !s.grp) return { col: "p.vid", level: "vid", label: "Вид номенклатуры" };
   return { col: "p.name", level: "position", label: "Позиция" };
 }
 
@@ -241,9 +245,14 @@ function buildScopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: 
     : dateList.length - 1;
   if (idx < 0) idx = dateList.length - 1;
   const target = dateList[idx];
-  const prev = idx > 0 ? dateList[idx - 1] : null;
+  // по датам сравнение идёт шагом из настроек (по умолчанию 4 недели):
+  // соседний снимок отличается на сутки и сравнивать с ним нечего.
+  // По месяцам шаг и так крупный — берём соседние месяцы.
+  const prev = weekly ? prevDate(target) : idx > 0 ? dateList[idx - 1] : null;
   const nAvg = weekly ? 8 : 3;
-  const avgDates = dateList.slice(Math.max(0, idx - nAvg), idx);
+  const avgDates = weekly
+    ? priorDates(target, nAvg)
+    : dateList.slice(Math.max(0, idx - nAvg), idx);
 
   const totalAt = (date: string): KM => scopeTotalAt(date, scope);
 
@@ -321,7 +330,7 @@ function buildScopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: 
     movers.fell = rows.filter((m) => m.diff < 0).sort((a, b) => a.diff - b.diff).slice(0, 6).map(shape);
   }
 
-  const label = scope.grp ?? scope.vid ?? scope.tip ?? "Все запасы";
+  const label = scope.vid ?? scope.grp ?? scope.tip ?? "Все запасы";
   return {
     kind,
     scope,
@@ -347,13 +356,30 @@ function buildScopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: 
 
 export type ExpiryBucketKey = "overdue" | "d30" | "d60" | "d90" | "ok" | "no_date";
 
+/** Колонки, по которым можно сортировать детализацию отчёта по срокам. */
+export type ExpirySort = "nearest" | "kg" | "money" | "batches" | "name";
+
 export interface ExpiryParams {
   tip?: string;
   bucket?: ExpiryBucketKey;
   /** Показывать только партии, у которых срок истекает не позже чем через N дней. */
   withinDays?: number;
   limit?: number;
+  sort?: ExpirySort;
+  dir?: "asc" | "desc";
 }
+
+/**
+ * ORDER BY для позиций. `nearest` сохраняет прежнее поведение: сначала те, у
+ * кого срок ближе, позиции без срока — в конец независимо от направления.
+ */
+const EXPIRY_ORDER: Record<ExpirySort, (dir: string) => string> = {
+  nearest: (d) => `(MIN(b.best_before) IS NULL), MIN(b.best_before) ${d}, money DESC`,
+  kg: (d) => `kg ${d}, money DESC`,
+  money: (d) => `money ${d}, kg DESC`,
+  batches: (d) => `batches ${d}, money DESC`,
+  name: (d) => `pos.name ${d}`,
+};
 
 /**
  * Детализация сроков годности по номенклатуре: партии текущего снимка,
@@ -363,7 +389,7 @@ export interface ExpiryParams {
  * поэтому отчёт всегда про «сейчас на складе».
  */
 export function expiryReport(p: ExpiryParams = {}) {
-  const key = ["expiry", p.tip, p.bucket, p.withinDays, p.limit].join("");
+  const key = ["expiry", p.tip, p.bucket, p.withinDays, p.limit, p.sort, p.dir].join("");
   return cached(key, () => buildExpiryReport(p));
 }
 
@@ -371,22 +397,31 @@ function buildExpiryReport(p: ExpiryParams = {}) {
   const cur = currentDate();
   const limit = Math.min(Math.max(p.limit ?? 300, 1), 2000);
 
-  const where: string[] = ["b.date = @cur"];
-  const bind: Record<string, any> = { cur, limit };
+  // Условия на сами партии (срок годности). Их надо применять ДВАЖДЫ: при
+  // отборе позиций и при выборке серий внутри позиции — иначе фильтр
+  // «Просрочено» отбирает нужные позиции, но в раскрытии показывает все серии
+  // подряд, включая нормальные.
+  const batchWhere: string[] = [];
+  const batchBind: Record<string, any> = { cur };
+  if (p.bucket) batchWhere.push(BUCKET_SQL[p.bucket]);
+  if (p.withinDays != null && Number.isFinite(p.withinDays)) {
+    batchWhere.push(
+      "b.best_before IS NOT NULL AND julianday(b.best_before) - julianday(@cur) <= @within",
+    );
+    batchBind.within = p.withinDays;
+  }
+
+  const where: string[] = ["b.date = @cur", ...batchWhere];
+  const bind: Record<string, any> = { ...batchBind, limit };
   if (p.tip) {
     where.push("pos.tip = @tip");
     bind.tip = p.tip;
   }
-  if (p.bucket) {
-    where.push(BUCKET_SQL[p.bucket]);
-  }
-  if (p.withinDays != null && Number.isFinite(p.withinDays)) {
-    where.push(
-      "b.best_before IS NOT NULL AND julianday(b.best_before) - julianday(@cur) <= @within",
-    );
-    bind.within = p.withinDays;
-  }
   const clause = where.join(" AND ");
+
+  const sort: ExpirySort = EXPIRY_ORDER[p.sort as ExpirySort] ? (p.sort as ExpirySort) : "nearest";
+  const dir = p.dir === "asc" ? "ASC" : p.dir === "desc" ? "DESC" : sort === "nearest" ? "ASC" : "DESC";
+  const orderBy = EXPIRY_ORDER[sort](dir);
 
   const positions = D()
     .prepare(
@@ -399,7 +434,7 @@ function buildExpiryReport(p: ExpiryParams = {}) {
        FROM batch b JOIN position pos ON pos.position_id = b.position_id
        WHERE ${clause}
        GROUP BY pos.position_id
-       ORDER BY (MIN(b.best_before) IS NULL), MIN(b.best_before) ASC, money DESC
+       ORDER BY ${orderBy}
        LIMIT @limit`,
     )
     .all(bind) as any[];
@@ -407,15 +442,23 @@ function buildExpiryReport(p: ExpiryParams = {}) {
   const ids = positions.map((r) => r.id);
   const byPosition = new Map<string, any[]>();
   if (ids.length) {
-    const ph = ids.map(() => "?").join(",");
+    const idBind: Record<string, any> = {};
+    const ph = ids
+      .map((id, i) => {
+        idBind["p" + i] = id;
+        return "@p" + i;
+      })
+      .join(",");
+    const detailWhere = ["b.date = @cur", `b.position_id IN (${ph})`, ...batchWhere];
     for (const b of D()
       .prepare(
-        `SELECT position_id, series, kg, money, best_before, manufactured, manager, counterparty,
-                CAST(julianday(best_before) - julianday(?) AS INTEGER) AS daysLeft
-         FROM batch WHERE date = ? AND position_id IN (${ph})
-         ORDER BY (best_before IS NULL), best_before ASC`,
+        `SELECT b.position_id, b.series, b.kg, b.money, b.best_before, b.manufactured,
+                b.manager, b.counterparty,
+                CAST(julianday(b.best_before) - julianday(@cur) AS INTEGER) AS daysLeft
+         FROM batch b WHERE ${detailWhere.join(" AND ")}
+         ORDER BY (b.best_before IS NULL), b.best_before ASC`,
       )
-      .all(cur, cur, ...ids) as any[]) {
+      .all({ ...batchBind, ...idBind }) as any[]) {
       const arr = byPosition.get(b.position_id) ?? [];
       arr.push({
         series: b.series,
@@ -444,7 +487,13 @@ function buildExpiryReport(p: ExpiryParams = {}) {
 
   return {
     date: cur,
-    filter: { tip: p.tip ?? null, bucket: p.bucket ?? null, withinDays: p.withinDays ?? null },
+    filter: {
+      tip: p.tip ?? null,
+      bucket: p.bucket ?? null,
+      withinDays: p.withinDays ?? null,
+      sort,
+      dir: dir.toLowerCase() as "asc" | "desc",
+    },
     buckets: expiryBuckets(p.tip ? { tip: p.tip } : {}),
     tips: (
       D().prepare("SELECT DISTINCT tip FROM position ORDER BY tip").all() as { tip: string }[]
@@ -550,7 +599,6 @@ function resolveChild(p: CompetitiveParams): { col: string; label: string } | nu
   const { clause, bind } = scopeOnP(p);
   const candidates: { col: string; label: string }[] = [];
   if (!p.vid) candidates.push({ col: "p.vid", label: "Вид" });
-  if (!p.grp) candidates.push({ col: "p.grp", label: "Группа" });
   candidates.push({ col: "p.name", label: "Позиция" });
 
   for (const c of candidates) {
