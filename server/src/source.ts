@@ -255,11 +255,67 @@ function pick(keys: Map<string, string>, field: Field): string | undefined {
   return undefined;
 }
 
+/** Все исходные колонки, подходящие под алиасы поля, в порядке алиасов. */
+function candidates(keys: Map<string, string>, field: Field): string[] {
+  const out: string[] = [];
+  for (const alias of ALIASES[field]) {
+    const hit = keys.get(alias);
+    if (hit && !out.includes(hit)) out.push(hit);
+  }
+  for (const alias of ALIASES[field]) {
+    for (const [n, orig] of keys) if (n.startsWith(alias) && !out.includes(orig)) out.push(orig);
+  }
+  return out;
+}
+
+/** GUID, число или код без единого слова — не годится как подпись категории. */
+function looksLikeCode(v: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v) || !/[a-zа-яё]{3,}/i.test(v);
+}
+
+// Категории верхнего уровня, как их отдаёт 1С в «ТипНоменклатуры».
+const KNOWN_TIP = /готов|материал|полуфабрикат/i;
+
+export interface TipCandidate {
+  column: string;
+  distinct: number;
+  sample: string[];
+  score: number;
+}
+
+/**
+ * Колонку типа выбираем по содержимому, а не по порядку алиасов. В ответе 1С
+ * рядом лежат TypeN и TypeN_Name, и какая из них несёт три категории
+ * (готовая продукция / материалы / полуфабрикаты), по именам не угадать:
+ * жёсткий порядок уже дважды выбирал не ту колонку, и деление на категории
+ * пропадало. Побеждает колонка со знакомыми названиями категорий, затем —
+ * с небольшим числом осмысленных значений.
+ */
+function chooseTip(
+  cols: string[],
+  valuesOf: (col: string) => string[],
+): { column?: string; candidates: TipCandidate[] } {
+  const scored = cols.map((column, i) => {
+    const set = new Set(valuesOf(column).filter(Boolean));
+    const vals = [...set];
+    const known = vals.filter((v) => KNOWN_TIP.test(v)).length;
+    const codes = vals.filter(looksLikeCode).length;
+    let score = known * 100 - i;
+    if (set.size >= 2 && set.size <= 12) score += 10;
+    if (vals.length && codes / vals.length > 0.5) score -= 5;
+    if (set.size === 0) score -= 1000;
+    return { column, distinct: set.size, sample: vals.slice(0, 6), score };
+  });
+  const best = [...scored].sort((a, b) => b.score - a.score)[0];
+  return { column: best?.column, candidates: scored };
+}
+
 export interface ParseDiag {
   format: "json" | "csv" | "xlsx" | "unknown";
   mappedColumns: Partial<Record<Field, string>>;
   unmapped: string[];
   skipped: number;
+  tipCandidates?: TipCandidate[];
 }
 
 export interface ParsedSource extends ImportResult {
@@ -326,6 +382,8 @@ function parseJson(raw: string, askDate: string): ParsedSource {
   for (const k of Object.keys(arr[0])) keys.set(norm(k), k);
   const col = {} as Record<Field, string | undefined>;
   for (const f of Object.keys(ALIASES) as Field[]) col[f] = pick(keys, f);
+  const tipPick = chooseTip(candidates(keys, "tip"), (c) => arr.map((o: any) => text(o?.[c])));
+  col.tip = tipPick.column;
 
   if (!col.name) {
     throw new Error(
@@ -369,6 +427,7 @@ function parseJson(raw: string, askDate: string): ParsedSource {
       mappedColumns: col as Partial<Record<Field, string>>,
       unmapped: [...keys.values()].filter((k) => !mapped.includes(k)),
       skipped,
+      tipCandidates: tipPick.candidates,
     },
   };
 }
@@ -387,6 +446,12 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
   header.forEach((h) => keys.set(norm(h), h));
   const col = {} as Record<Field, string | undefined>;
   for (const f of Object.keys(ALIASES) as Field[]) col[f] = pick(keys, f);
+  const body = lines.slice(1).map(split);
+  const tipPick = chooseTip(candidates(keys, "tip"), (c) => {
+    const i = header.indexOf(c);
+    return body.map((cells) => cells[i] ?? "");
+  });
+  col.tip = tipPick.column;
   if (!col.name)
     throw new Error("Не найдена колонка номенклатуры. Заголовок: " + header.join(" | "));
   const at = (cells: string[], f: Field) => {
@@ -397,8 +462,7 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
   const rows: RawRow[] = [];
   let snapshotDate = "";
   let skipped = 0;
-  for (const line of lines.slice(1)) {
-    const cells = split(line);
+  for (const cells of body) {
     const name = at(cells, "name");
     const tip = at(cells, "tip");
     const vid = at(cells, "vid");
@@ -430,6 +494,7 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
       mappedColumns: col as Partial<Record<Field, string>>,
       unmapped: header.filter((h) => !mapped.includes(h)),
       skipped,
+      tipCandidates: tipPick.candidates,
     },
   };
 }

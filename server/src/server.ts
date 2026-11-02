@@ -84,6 +84,19 @@ ensurePassword();
   }
 }
 
+// Смоделированная история нужна только демо-базе. Как только в базе есть
+// реальные снимки, она лишь искажает тренды и сравнения — убираем при старте.
+{
+  const hasReal = !!(db().prepare("SELECT 1 AS x FROM snapshot WHERE kind = 'real' LIMIT 1").get() as any);
+  if (hasReal) {
+    const r = purgeModeled();
+    if (r.dates.length) {
+      db().exec("VACUUM");
+      console.log(`[storage] удалена смоделированная история: ${r.dates.length} дат ${r.from}…${r.to}`);
+    }
+  }
+}
+
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
 
 // Любая необработанная ошибка маршрута попадает и в stdout, и в журнал в базе,

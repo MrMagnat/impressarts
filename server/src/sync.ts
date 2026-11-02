@@ -13,7 +13,13 @@ import { hashId, round, addDays, ymd, parseYmd } from "./util.js";
 import { defaultPrice } from "./etl/prices.js";
 import { ingestSnapshot } from "./etl/ingest.js";
 import { fetchSource, parseSource, sourceConfig, type SourceConfig, type ParsedSource } from "./source.js";
-import { writeAggregate, writeAggregateFromRows, trimDetail, hasDetail } from "./history.js";
+import {
+  writeAggregate,
+  writeAggregateFromRows,
+  trimDetail,
+  hasDetail,
+  purgeModeled,
+} from "./history.js";
 import type { RawRow } from "./etl/import-excel.js";
 
 const D = () => db();
@@ -21,7 +27,7 @@ const D = () => db();
 let log: (m: string) => void = (m) => console.log(m);
 let running = false;
 
-export type Trigger = "schedule" | "manual" | "backfill";
+export type Trigger = "schedule" | "manual" | "backfill" | "reload";
 export type SyncStatus = "ok" | "diff" | "imported" | "error";
 
 export interface SyncResult {
@@ -245,6 +251,12 @@ export async function runSync(opts: RunOptions = {}): Promise<SyncResult> {
         ingestSnapshot({ snapshotDate, rows: parsed.rows });
         writeAggregate(snapshotDate);
         markSnapshot(snapshotDate, "day", "1c", 1);
+        // Пришёл реальный снимок — смоделированные недели рядом с фактом только
+        // искажают тренды и сравнения.
+        const purged = purgeModeled();
+        if (purged.dates.length) {
+          log(`[sync] удалена смоделированная история: ${purged.dates.length} дат ${purged.from}…${purged.to}`);
+        }
         // Сжатие старых дат — фоновая уборка, ответ её не ждёт.
         drainTrim(cfg.retentionDays);
       }
@@ -426,6 +438,75 @@ export async function backfillRange(
   return { requested: todo, loaded, failed, skipped };
 }
 
+export interface ReloadResult {
+  dates: number;
+  loaded: number;
+  failed: { date: string; error: string }[];
+  orphansDeleted: number;
+}
+
+/**
+ * Заново забрать из 1С все даты, которые уже были из неё загружены, и
+ * перезаписать их по текущим правилам разбора. Нужна, когда меняется
+ * сопоставление колонок: тип входит в ключ позиции, и снимки, разобранные
+ * по старым правилам, иначе так и остаются со старыми категориями.
+ * Даты с детализацией перезаписываются целиком, остальные — только агрегатом.
+ */
+export async function reloadFrom1c(): Promise<ReloadResult> {
+  const rows = D()
+    .prepare("SELECT date, detail FROM snapshot WHERE source = '1c' ORDER BY date")
+    .all() as { date: string; detail: number | null }[];
+  log(`[sync] перезагрузка из 1С: ${rows.length} дат`);
+
+  const failed: { date: string; error: string }[] = [];
+  let loaded = 0;
+  for (const r of rows) {
+    const res = await runSync({
+      date: r.date,
+      mode: "import",
+      trigger: "reload",
+      aggregateOnly: r.detail !== 1,
+    });
+    if (res.status === "error") failed.push({ date: r.date, error: res.message });
+    else loaded++;
+    await new Promise((res) => setTimeout(res, 300)); // не бомбить 1С
+  }
+
+  // позиции, разобранные по старым правилам, больше ни на что не ссылаются
+  const orphans = D()
+    .prepare(
+      "DELETE FROM position WHERE position_id NOT IN (SELECT position_id FROM fact) " +
+        "AND position_id NOT IN (SELECT position_id FROM batch)",
+    )
+    .run();
+  D()
+    .prepare("DELETE FROM position_dim WHERE position_id NOT IN (SELECT position_id FROM position)")
+    .run();
+  const orphansDeleted = Number(orphans.changes ?? 0);
+
+  log(
+    `[sync] перезагрузка из 1С завершена: ${loaded} из ${rows.length} дат, ` +
+      `ошибок ${failed.length}, удалено устаревших позиций ${orphansDeleted}`,
+  );
+  return { dates: rows.length, loaded, failed, orphansDeleted };
+}
+
+// Поднимается, когда меняются правила разбора и старые снимки надо перечитать.
+const RELOAD_VERSION = "tip-by-content-1";
+
+async function reloadIfRulesChanged(): Promise<void> {
+  if (getSetting("reload_version", "") === RELOAD_VERSION || running) return;
+  running = true;
+  try {
+    const r = await reloadFrom1c();
+    if (r.failed.length === 0) setSetting("reload_version", RELOAD_VERSION);
+  } catch (e: any) {
+    log("[sync] перезагрузка из 1С не удалась: " + (e?.message ?? String(e)));
+  } finally {
+    running = false;
+  }
+}
+
 // ---------- расписание ----------
 
 export interface ScheduleState {
@@ -495,5 +576,7 @@ export function startSync(logger: (m: string) => void): void {
       `режим ${cfg.mode === "import" ? "загрузка" : "сверка"}, URL ${cfg.url}`,
   );
   setInterval(() => void tick(), 5 * 60_000).unref();
-  setTimeout(() => void tick(), 30_000).unref(); // догнать пропущенный запуск после рестарта
+  // сначала перечитать уже загруженные даты по новым правилам, затем догнать
+  // пропущенный запуск после рестарта
+  setTimeout(() => void reloadIfRulesChanged().then(tick), 30_000).unref();
 }

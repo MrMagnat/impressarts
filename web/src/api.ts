@@ -373,7 +373,13 @@ export interface SyncResult {
   dbBefore: { kg: number; money: number };
   message: string;
   sample: string;
-  diag?: { format: string; mappedColumns: Record<string, string>; unmapped: string[]; skipped: number };
+  diag?: {
+    format: string;
+    mappedColumns: Record<string, string>;
+    unmapped: string[];
+    skipped: number;
+    tipCandidates?: { column: string; distinct: number; sample: string[]; score: number }[];
+  };
 }
 export interface SourceProbe {
   url: string;
