@@ -1,5 +1,5 @@
 import { db, currentDate, getSetting } from "./db.js";
-import { round, monthKey, addDays } from "./util.js";
+import { round, monthKey, addDays, byTipOrder } from "./util.js";
 import { seriesFor, seriesByTip } from "./history.js";
 import { cached } from "./cache.js";
 
@@ -174,9 +174,10 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
       .prepare(
         `SELECT k1 AS key, k1 AS label, k1 AS tip, NULL AS vid,
                 kg, money, positions
-         FROM fact_agg WHERE date = @cur AND level = 'tip' ORDER BY money DESC`,
+         FROM fact_agg WHERE date = @cur AND level = 'tip'`,
       )
       .all({ cur }) as any[];
+    rows.sort(byTipOrder((r: any) => r.key, (r: any) => r.money));
   } else if (level === "vid") {
     rows = D()
       .prepare(
@@ -467,9 +468,10 @@ function buildDashboard() {
   const byTip = D()
     .prepare(
       `SELECT k1 AS tip, kg, money, positions FROM fact_agg
-       WHERE date=? AND level='tip' ORDER BY money DESC`,
+       WHERE date=? AND level='tip'`,
     )
     .all(cur)
+    .sort(byTipOrder((r: any) => r.tip, (r: any) => r.money))
     .map((r: any) => ({ ...r, kg: round(r.kg, 1), money: round(r.money) }));
 
   const topVids = D()

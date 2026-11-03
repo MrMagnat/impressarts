@@ -1,5 +1,5 @@
 import { db, currentDate } from "./db.js";
-import { round, monthKey } from "./util.js";
+import { round, monthKey, byTipOrder, tipRank } from "./util.js";
 import { cached } from "./cache.js";
 import { prevDate, priorDates, expiryBuckets } from "./analytics.js";
 import {
@@ -73,7 +73,7 @@ function buildComparison(targetDate: string, prevD: string | null, avgDates: str
   const vidAvg = avgMaps(avgDates.length ? avgDates : [targetDate], "vid");
 
   const tips = [...tipCur.entries()]
-    .sort((a, b) => b[1].money - a[1].money)
+    .sort(byTipOrder(([t]) => t, ([, c]) => c.money))
     .map(([tip, c]) => {
       const vids = [...vidCur.entries()]
         .filter(([k]) => k.startsWith(tip + "¦"))
@@ -276,7 +276,11 @@ function buildScopeReport(scope: ScopeSel, kind: "weekly" | "monthly", period?: 
     cAvgAcc.set(k, { money: a.money + v.money, kg: a.kg + v.kg });
   }
   const children = [...cCur.entries()]
-    .sort((a, b) => b[1].money - a[1].money)
+    .sort(
+      child?.level === "tip"
+        ? byTipOrder(([k]) => k, ([, c]) => c.money)
+        : (a, b) => b[1].money - a[1].money,
+    )
     .map(([key, c]) => {
       const p = cPrev.get(key) ?? ZERO;
       const av = cAvgAcc.get(key);
@@ -497,7 +501,9 @@ function buildExpiryReport(p: ExpiryParams = {}) {
     buckets: expiryBuckets(p.tip ? { tip: p.tip } : {}),
     tips: (
       D().prepare("SELECT DISTINCT tip FROM position ORDER BY tip").all() as { tip: string }[]
-    ).map((r) => r.tip),
+    )
+      .map((r) => r.tip)
+      .sort((a, b) => tipRank(a) - tipRank(b) || a.localeCompare(b, "ru")),
     totals: {
       positions: positions.length,
       kg: round(totals.kg, 1),

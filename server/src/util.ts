@@ -64,3 +64,18 @@ export function groupOf(name: string): string {
   const g = i >= 0 ? name.slice(0, i).trim() : "";
   return g || "Без группы";
 }
+
+// Верхний уровень всегда в одном порядке: готовая продукция, полуфабрикаты,
+// материалы — дальше остальные типы. Порядок по сумме переставлял категории
+// от снимка к снимку, а клиент читает дерево именно сверху вниз в этом порядке.
+const TIP_ORDER = [/готов/i, /полуфабрикат/i, /материал/i];
+
+export function tipRank(tip: string): number {
+  const i = TIP_ORDER.findIndex((re) => re.test(tip));
+  return i < 0 ? TIP_ORDER.length : i;
+}
+
+/** Сравнение для сортировки типов: фиксированный порядок, затем по сумме. */
+export function byTipOrder<T>(tipOf: (x: T) => string, moneyOf: (x: T) => number) {
+  return (a: T, b: T) => tipRank(tipOf(a)) - tipRank(tipOf(b)) || moneyOf(b) - moneyOf(a);
+}
