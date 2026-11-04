@@ -57,6 +57,7 @@ export interface TreeNode {
 export interface TreeResp {
   parent: { level: string; label: string; kg: number; money: number };
   children: TreeNode[];
+  path?: { tip?: string; vid?: string; grp?: string };
 }
 
 export interface Batch {
@@ -378,7 +379,6 @@ export interface SyncResult {
     mappedColumns: Record<string, string>;
     unmapped: string[];
     skipped: number;
-    tipCandidates?: { column: string; distinct: number; sample: string[]; score: number }[];
   };
 }
 export interface SourceProbe {

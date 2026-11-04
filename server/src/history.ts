@@ -13,7 +13,7 @@
  * подтягивается по требованию (sync.backfillRange), минуя `fact` вовсе.
  */
 import { db, currentDate } from "./db.js";
-import { round, addDays, monthKey, groupOf, hashId } from "./util.js";
+import { round, addDays, monthKey, hashId } from "./util.js";
 import { defaultPrice } from "./etl/prices.js";
 import { bumpDataVersion } from "./cache.js";
 import type { RawRow } from "./etl/import-excel.js";
@@ -135,7 +135,7 @@ export function writeAggregateFromRows(date: string, rows: RawRow[]): number {
 
   for (const r of rows) {
     const pid = hashId(r.tip, "|", r.vid, "|", r.name);
-    const grp = groupOf(r.name);
+    const grp = r.grp || r.vid;
     // стоимость из 1С приоритетнее модельной цены
     const money =
       r.cost != null && Number.isFinite(r.cost) ? (r.cost as number) : r.kg * priceOf(r.tip, r.vid);
@@ -249,14 +249,14 @@ export function scopeTotalAt(date: string, scope: Scope): KM {
 }
 
 /**
- * Уровень потомков для среза дерева. Иерархия: Тип -> Вид -> Позиция.
- * «Группа» остаётся уровнем агрегата для совместимости со старыми срезами:
- * если она задана явно, разбивка идёт сразу до позиций.
+ * Уровень потомков для среза дерева. Иерархия повторяет 1С:
+ * категория (tip) -> группа (vid) -> вид (grp) -> позиция.
  */
 export function childLevelOf(scope: Scope): AggLevel | "position" {
   if (!scope.tip) return "tip";
-  if (scope.vid || scope.grp) return "position";
-  return "vid";
+  if (!scope.vid) return "vid";
+  if (!scope.grp) return "grp";
+  return "position";
 }
 
 /**
@@ -487,6 +487,58 @@ export function purgeModeled(): PurgeResult {
     to: dates[dates.length - 1],
     factRowsDeleted: factRows,
     aggRowsDeleted: aggRows,
+  };
+}
+
+/**
+ * Удалить всё, что было в базе до начала загрузки из 1С: смоделированную
+ * историю и снимки из демо-выгрузки Excel. Их категории называются иначе
+ * («Материалы в ролях» против «Материалы» в 1С), и рядом с фактом из 1С они
+ * давали на графиках лишние категории и ложные скачки.
+ * Пока из 1С не загружено ни одной даты, удаляется только модель.
+ */
+export function purgeBefore1c(): PurgeResult {
+  const modeled = purgeModeled();
+  const first = (
+    D().prepare("SELECT MIN(date) AS d FROM snapshot WHERE source = '1c'").get() as {
+      d: string | null;
+    }
+  ).d;
+  if (!first) return modeled;
+
+  const d = D();
+  const dates = (
+    d.prepare("SELECT date FROM snapshot WHERE date < ? ORDER BY date").all(first) as {
+      date: string;
+    }[]
+  ).map((r) => r.date);
+  let factRows = 0;
+  let aggRows = 0;
+  d.exec("BEGIN");
+  try {
+    factRows = Number(d.prepare("DELETE FROM fact WHERE date < ?").run(first).changes ?? 0);
+    aggRows = Number(d.prepare("DELETE FROM fact_agg WHERE date < ?").run(first).changes ?? 0);
+    d.prepare("DELETE FROM batch WHERE date < ?").run(first);
+    d.prepare("DELETE FROM snapshot WHERE date < ?").run(first);
+    // позиции, которые остались только в удалённых снимках
+    d.exec(
+      "DELETE FROM position WHERE position_id NOT IN (SELECT position_id FROM fact) " +
+        "AND position_id NOT IN (SELECT position_id FROM batch)",
+    );
+    d.exec("DELETE FROM position_dim WHERE position_id NOT IN (SELECT position_id FROM position)");
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
+  bumpDataVersion();
+  const all = [...modeled.dates, ...dates].sort();
+  return {
+    dates: all,
+    from: all[0] ?? null,
+    to: all[all.length - 1] ?? null,
+    factRowsDeleted: modeled.factRowsDeleted + factRows,
+    aggRowsDeleted: modeled.aggRowsDeleted + aggRows,
   };
 }
 

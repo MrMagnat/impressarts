@@ -18,7 +18,7 @@ import {
   writeAggregateFromRows,
   trimDetail,
   hasDetail,
-  purgeModeled,
+  purgeBefore1c,
 } from "./history.js";
 import type { RawRow } from "./etl/import-excel.js";
 
@@ -251,11 +251,11 @@ export async function runSync(opts: RunOptions = {}): Promise<SyncResult> {
         ingestSnapshot({ snapshotDate, rows: parsed.rows });
         writeAggregate(snapshotDate);
         markSnapshot(snapshotDate, "day", "1c", 1);
-        // Пришёл реальный снимок — смоделированные недели рядом с фактом только
+        // Пришёл снимок из 1С — модель и демо-выгрузка рядом с ним только
         // искажают тренды и сравнения.
-        const purged = purgeModeled();
+        const purged = purgeBefore1c();
         if (purged.dates.length) {
-          log(`[sync] удалена смоделированная история: ${purged.dates.length} дат ${purged.from}…${purged.to}`);
+          log(`[sync] удалены данные до загрузки из 1С: ${purged.dates.length} дат ${purged.from}…${purged.to}`);
         }
         // Сжатие старых дат — фоновая уборка, ответ её не ждёт.
         drainTrim(cfg.retentionDays);
@@ -492,7 +492,7 @@ export async function reloadFrom1c(): Promise<ReloadResult> {
 }
 
 // Поднимается, когда меняются правила разбора и старые снимки надо перечитать.
-const RELOAD_VERSION = "tip-by-content-2";
+const RELOAD_VERSION = "tree-1c-3";
 
 async function reloadIfRulesChanged(): Promise<void> {
   if (getSetting("reload_version", "") === RELOAD_VERSION || running) return;

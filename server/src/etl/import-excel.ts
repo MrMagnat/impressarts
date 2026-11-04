@@ -4,6 +4,8 @@ import { ymd } from "../util.js";
 export interface RawRow {
   tip: string;
   vid: string;
+  /** Вид внутри группы (TypeN_Name в 1С). Пусто — уровень совпадает с группой. */
+  grp?: string;
   name: string;
   series: string;
   kg: number;

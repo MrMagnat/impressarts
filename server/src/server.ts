@@ -62,6 +62,7 @@ import {
   repriceAggregate,
   trimDetail,
   purgeModeled,
+  purgeBefore1c,
   storageStats,
 } from "./history.js";
 import { logError, recentAppLog, clearAppLog } from "./applog.js";
@@ -84,16 +85,13 @@ ensurePassword();
   }
 }
 
-// Смоделированная история нужна только демо-базе. Как только в базе есть
-// реальные снимки, она лишь искажает тренды и сравнения — убираем при старте.
+// Смоделированная история и демо-выгрузка нужны только до первой загрузки
+// из 1С. Дальше они лишь искажают тренды и сравнения — убираем при старте.
 {
-  const hasReal = !!(db().prepare("SELECT 1 AS x FROM snapshot WHERE kind = 'real' LIMIT 1").get() as any);
-  if (hasReal) {
-    const r = purgeModeled();
-    if (r.dates.length) {
-      db().exec("VACUUM");
-      console.log(`[storage] удалена смоделированная история: ${r.dates.length} дат ${r.from}…${r.to}`);
-    }
+  const r = purgeBefore1c();
+  if (r.dates.length) {
+    db().exec("VACUUM");
+    console.log(`[storage] удалены данные до загрузки из 1С: ${r.dates.length} дат ${r.from}…${r.to}`);
   }
 }
 

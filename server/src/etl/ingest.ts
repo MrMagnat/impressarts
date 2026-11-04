@@ -1,5 +1,5 @@
 import { db, initSchema, setSetting } from "../db.js";
-import { hashId, groupOf, seededSigned, seededUnit, addDays, round, ymd, parseYmd } from "../util.js";
+import { hashId, seededSigned, seededUnit, addDays, round, ymd, parseYmd } from "../util.js";
 import { defaultPrice } from "./prices.js";
 import type { ImportResult, RawRow } from "./import-excel.js";
 
@@ -57,7 +57,7 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
 
     const insPos = d.prepare(
       "INSERT INTO position(position_id, tip, vid, grp, name) VALUES(?,?,?,?,?) " +
-        "ON CONFLICT(position_id) DO NOTHING",
+        "ON CONFLICT(position_id) DO UPDATE SET grp = excluded.grp",
     );
     const insBatch = d.prepare(
       `INSERT INTO batch(date, position_id, series, kg, best_before, manufactured, manager, counterparty, price_per_kg, money)
@@ -72,7 +72,8 @@ export function ingestSnapshot(result: ImportResult): { date: string; positions:
 
     for (const r of rows) {
       const pid = positionId(r.tip, r.vid, r.name);
-      const grp = groupOf(r.name);
+      // вид (TypeN_Name); без него уровень совпадает с группой и схлопывается
+      const grp = r.grp || r.vid;
       insPos.run(pid, r.tip, r.vid, grp, r.name);
       // 1С отдаёт реальную стоимость остатка (CostRub) — она приоритетнее
       // модельной цены ₽/кг; ₽/кг тогда выводим обратным счётом

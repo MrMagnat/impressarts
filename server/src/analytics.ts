@@ -122,6 +122,7 @@ export interface TreeNode {
 export function treeChildren(params: { tip?: string; vid?: string; grp?: string }): {
   parent: { level: string; label: string; kg: number; money: number };
   children: TreeNode[];
+  path: { tip?: string; vid?: string; grp?: string };
 } {
   return cached(
     "tree:" + [params.tip, params.vid, params.grp].join(""),
@@ -132,48 +133,26 @@ export function treeChildren(params: { tip?: string; vid?: string; grp?: string 
 function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
   parent: { level: string; label: string; kg: number; money: number };
   children: TreeNode[];
+  path: { tip?: string; vid?: string; grp?: string };
 } {
   const cur = currentDate();
   const { tip, vid, grp } = params;
 
+  // Иерархия повторяет дерево номенклатуры 1С:
+  //   категория (TypeN) -> группа (Parents) -> вид (TypeN_Name) -> позиция -> партии.
   let level: TreeNode["level"];
-  let groupCol: string;
-  const where: string[] = ["f.date = @cur"];
-  const bind: Record<string, any> = { cur };
+  if (!tip) level = "tip";
+  else if (!vid) level = "vid";
+  else if (!grp) level = "grp";
+  else level = "position";
 
-  // Иерархия: Тип (TypeN_Name) -> Вид (Parents) -> Позиция -> Партии.
-  // «Группа» (префикс имени до двоеточия) из навигации убрана: у реальной
-  // выгрузки двоеточия нет у большинства позиций, и уровень вырождался в
-  // одну «Без группы». Поле grp остаётся в модели для старых отчётов.
-  if (!tip) {
-    level = "tip";
-    groupCol = "p.tip";
-  } else if (!vid) {
-    level = "vid";
-    groupCol = "p.vid";
-    where.push("p.tip = @tip");
-    bind.tip = tip;
-  } else {
-    level = "position";
-    groupCol = "p.position_id";
-    where.push("p.tip = @tip AND p.vid = @vid");
-    bind.tip = tip;
-    bind.vid = vid;
-  }
-  if (grp) {
-    where.push("p.grp = @grp");
-    bind.grp = grp;
-  }
-
-  // Уровни «тип» и «группа» целиком покрываются агрегатом — джойн детальных
-  // таблиц на десятки тысяч строк там не нужен. Детализация читается только
-  // на уровне позиций.
+  // Уровни выше позиции целиком покрываются агрегатом — джойн детальных
+  // таблиц на десятки тысяч строк там не нужен.
   let rows: any[];
   if (level === "tip") {
     rows = D()
       .prepare(
-        `SELECT k1 AS key, k1 AS label, k1 AS tip, NULL AS vid,
-                kg, money, positions
+        `SELECT k1 AS key, k1 AS label, kg, money, positions
          FROM fact_agg WHERE date = @cur AND level = 'tip'`,
       )
       .all({ cur }) as any[];
@@ -181,64 +160,83 @@ function buildTree(params: { tip?: string; vid?: string; grp?: string }): {
   } else if (level === "vid") {
     rows = D()
       .prepare(
-        `SELECT k2 AS key, k2 AS label, k1 AS tip, k2 AS vid,
-                kg, money, positions
+        `SELECT k2 AS key, k2 AS label, kg, money, positions
          FROM fact_agg WHERE date = @cur AND level = 'vid' AND k1 = @tip
          ORDER BY money DESC`,
       )
       .all({ cur, tip } as any) as any[];
+  } else if (level === "grp") {
+    rows = D()
+      .prepare(
+        `SELECT k3 AS key, k3 AS label, kg, money, positions
+         FROM fact_agg WHERE date = @cur AND level = 'grp' AND k1 = @tip AND k2 = @vid
+         ORDER BY money DESC`,
+      )
+      .all({ cur, tip, vid } as any) as any[];
   } else {
     rows = D()
       .prepare(
-        `SELECT ${groupCol} AS key, p.name AS label, p.tip AS tip, p.vid AS vid,
+        `SELECT p.position_id AS key, p.name AS label,
                 SUM(f.kg) AS kg, SUM(f.money) AS money,
                 COUNT(DISTINCT p.position_id) AS positions
          FROM fact f JOIN position p ON p.position_id = f.position_id
-         WHERE ${where.join(" AND ")}
-         GROUP BY ${groupCol}
+         WHERE f.date = @cur AND p.tip = @tip AND p.vid = @vid AND p.grp = @grp
+         GROUP BY p.position_id
          ORDER BY money DESC`,
       )
-      .all(bind) as any[];
+      .all({ cur, tip, vid, grp } as any) as any[];
+  }
+
+  // Единственный элемент на уровне (у готовой продукции группа и вид совпадают
+  // с категорией) — сразу показываем следующий уровень, без пустого клика.
+  if ((level === "vid" || level === "grp") && rows.length === 1) {
+    const key = String(rows[0].key);
+    return buildTree(level === "vid" ? { tip, vid: key } : { tip, vid, grp: key });
   }
 
   const totalMoney = rows.reduce((s, r) => s + r.money, 0) || 1;
 
-  // batch counts for positions
-  let batchCounts = new Map<string, number>();
+  const batchCounts = new Map<string, number>();
   if (level === "position") {
     for (const r of D()
       .prepare(
         `SELECT position_id AS id, COUNT(*) AS c FROM batch WHERE date=@cur AND position_id IN
-         (SELECT position_id FROM position WHERE tip=@tip AND vid=@vid) GROUP BY position_id`,
+         (SELECT position_id FROM position WHERE tip=@tip AND vid=@vid AND grp=@grp)
+         GROUP BY position_id`,
       )
-      .all({ cur, tip, vid } as any) as { id: string; c: number }[]) {
+      .all({ cur, tip, vid, grp } as any) as { id: string; c: number }[]) {
       batchCounts.set(r.id, r.c);
     }
   }
 
-  const children: TreeNode[] = rows.map((r) => ({
-    level,
-    key: String(r.key),
-    label: String(r.label),
-    tip: r.tip,
-    vid: level === "tip" ? undefined : level === "vid" ? String(r.key) : r.vid ?? vid,
-    grp,
-    kg: round(r.kg, 1),
-    money: round(r.money),
-    positions: r.positions,
-    batches: level === "position" ? batchCounts.get(String(r.key)) ?? 0 : undefined,
-    sharePct: round((r.money / totalMoney) * 100, 1),
-    hasChildren: level !== "position",
-  }));
+  const children: TreeNode[] = rows.map((r) => {
+    const key = String(r.key);
+    return {
+      level,
+      key,
+      label: String(r.label),
+      tip: level === "tip" ? key : (tip as string),
+      vid: level === "vid" ? key : vid,
+      grp: level === "grp" ? key : grp,
+      kg: round(r.kg, 1),
+      money: round(r.money),
+      positions: r.positions,
+      batches: level === "position" ? batchCounts.get(key) ?? 0 : undefined,
+      sharePct: round((r.money / totalMoney) * 100, 1),
+      hasChildren: level !== "position",
+    };
+  });
 
   const pTotal = children.reduce(
     (a, c) => ({ kg: a.kg + c.kg, money: a.money + c.money }),
     { kg: 0, money: 0 },
   );
-  const label = vid ?? grp ?? tip ?? "Все запасы";
+  const label = grp ?? vid ?? tip ?? "Все запасы";
   return {
     parent: { level, label, kg: round(pTotal.kg, 1), money: round(pTotal.money) },
     children,
+    // путь с учётом схлопнутых уровней — по нему интерфейс строит «хлебные крошки»
+    path: { tip, vid, grp },
   };
 }
 

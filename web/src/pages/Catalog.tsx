@@ -12,16 +12,17 @@ interface Path {
 }
 
 const LEVEL_LABEL: Record<string, string> = {
-  tip: "Тип номенклатуры",
-  vid: "Вид номенклатуры",
-  grp: "Группа",
+  tip: "Категория",
+  vid: "Группа",
+  grp: "Вид",
   position: "Позиция",
 };
 
 // Доля колонки с названием: на реальных данных имена материалов длинные
 // («… ширина 1200 …»), и обрезка по max-w-md съедала самую важную часть.
 
-// Иерархия каталога: Тип (TypeN_Name) -> Вид (Parents) -> Позиция -> Партии.
+// Иерархия каталога повторяет дерево 1С:
+// категория (TypeN) -> группа (Parents) -> вид (TypeN_Name) -> позиция -> партии.
 
 export default function Catalog() {
   const [path, setPath] = useState<Path>({});
@@ -46,20 +47,26 @@ export default function Catalog() {
     return () => clearTimeout(t);
   }, [q]);
 
+  // Крошки строятся по пути, который вернул сервер: уровни с единственным
+  // элементом он проходит сам, и повторяющееся название показываем один раз.
   const crumbs = useMemo(() => {
+    const p: Path = data?.path ?? path;
     const arr: { label: string; go: Path }[] = [{ label: "Все запасы", go: {} }];
-    if (path.tip) arr.push({ label: path.tip, go: { tip: path.tip } });
-    if (path.vid) arr.push({ label: path.vid, go: { tip: path.tip, vid: path.vid } });
+    const add = (label: string | undefined, go: Path) => {
+      if (label && label !== arr[arr.length - 1].label) arr.push({ label, go });
+    };
+    add(p.tip, { tip: p.tip });
+    add(p.vid, { tip: p.tip, vid: p.vid });
+    add(p.grp, { tip: p.tip, vid: p.vid, grp: p.grp });
     return arr;
-  }, [path]);
+  }, [data, path]);
 
   const drill = (n: TreeNode) => {
     if (n.level === "position") {
       setOpenId(n.key);
       return;
     }
-    if (n.level === "tip") setPath({ tip: n.key });
-    else if (n.level === "vid") setPath({ tip: path.tip, vid: n.key });
+    setPath({ tip: n.tip, vid: n.vid, grp: n.grp });
   };
 
   const canCompete = !!path.tip; // competitive available once inside a type
@@ -69,7 +76,7 @@ export default function Catalog() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold">Каталог складских запасов</h1>
-          <p className="text-ink-mut text-sm">Дерево: тип → вид номенклатуры → позиция → партии</p>
+          <p className="text-ink-mut text-sm">Дерево: категория → группа → вид → позиция → партии</p>
         </div>
         <div className="relative">
           <input
@@ -142,7 +149,7 @@ export default function Catalog() {
             tip: path.tip,
             vid: path.vid,
             grp: path.grp,
-            label: path.vid ?? path.grp ?? path.tip ?? "",
+            label: path.grp ?? path.vid ?? path.tip ?? "",
           }}
         />
       )}

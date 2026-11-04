@@ -311,14 +311,6 @@ function RunResult({ r }: { r: SyncResult }) {
               .join(", ") || "—"}
           </div>
           {r.diag.unmapped.length > 0 && <div>Не использованы: {r.diag.unmapped.join(", ")}</div>}
-          {r.diag.tipCandidates && r.diag.tipCandidates.length > 1 && (
-            <div>
-              Тип номенклатуры:{" "}
-              {r.diag.tipCandidates
-                .map((c) => `${c.column} (${c.distinct} знач.: ${c.sample.slice(0, 3).join(", ")})`)
-                .join("; ")}
-            </div>
-          )}
         </div>
       )}
     </div>

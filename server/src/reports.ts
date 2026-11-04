@@ -197,13 +197,13 @@ export interface ScopeSel {
 }
 
 /**
- * Уровень потомков для среза в дереве Тип→Вид→Позиция.
- * Группировка идёт по виду номенклатуры (поле Parents из 1С), а не по «группе»
- * из префикса имени: в реальной выгрузке префикса нет у большинства позиций.
+ * Уровень потомков для среза в дереве 1С:
+ * категория (TypeN) -> группа (Parents) -> вид (TypeN_Name) -> позиция.
  */
 function reportChild(s: ScopeSel): { col: string; level: string; label: string } | null {
-  if (!s.tip) return { col: "p.tip", level: "tip", label: "Тип номенклатуры" };
-  if (!s.vid && !s.grp) return { col: "p.vid", level: "vid", label: "Вид номенклатуры" };
+  if (!s.tip) return { col: "p.tip", level: "tip", label: "Категория" };
+  if (!s.vid) return { col: "p.vid", level: "vid", label: "Группа" };
+  if (!s.grp) return { col: "p.grp", level: "grp", label: "Вид" };
   return { col: "p.name", level: "position", label: "Позиция" };
 }
 
