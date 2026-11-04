@@ -454,7 +454,8 @@ export interface ReloadResult {
  */
 export async function reloadFrom1c(): Promise<ReloadResult> {
   const rows = D()
-    .prepare("SELECT date, detail FROM snapshot WHERE source = '1c' ORDER BY date")
+    // от свежих к старым: текущий день, который видно в интерфейсе, исправляется первым
+    .prepare("SELECT date, detail FROM snapshot WHERE source = '1c' ORDER BY date DESC")
     .all() as { date: string; detail: number | null }[];
   log(`[sync] перезагрузка из 1С: ${rows.length} дат`);
 
