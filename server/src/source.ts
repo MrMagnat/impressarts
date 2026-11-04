@@ -276,6 +276,32 @@ function looksLikeCode(v: string): boolean {
 // Категории верхнего уровня, как их отдаёт 1С в «ТипНоменклатуры».
 const KNOWN_TIP = /готов|материал|полуфабрикат/i;
 
+/**
+ * Колонки, где 1С может отдать категорию: выбранная колонка типа, остальные
+ * колонки типа и MapRoad — путь «тип/родитель», у которого категория первым
+ * звеном. Категорий ровно три, поэтому для каждой строки берётся первое
+ * значение, похожее на одну из них, откуда бы оно ни пришло.
+ */
+function categorySources(keys: Map<string, string>, chosen?: string): string[] {
+  const out = chosen ? [chosen] : [];
+  for (const c of candidates(keys, "tip")) if (!out.includes(c)) out.push(c);
+  for (const [n, orig] of keys) {
+    if ((n.startsWith("maproad") || n.startsWith("путь")) && !out.includes(orig)) out.push(orig);
+  }
+  return out;
+}
+
+/** Первое звено, похожее на категорию, из значений колонок `sources`. */
+function categoryOf(sources: string[], valueOf: (col: string) => string): string | null {
+  for (const c of sources) {
+    for (const part of valueOf(c).split(/[\/\\>|;]/)) {
+      const t = part.trim();
+      if (t && KNOWN_TIP.test(t)) return t;
+    }
+  }
+  return null;
+}
+
 export interface TipCandidate {
   column: string;
   distinct: number;
@@ -384,6 +410,7 @@ function parseJson(raw: string, askDate: string): ParsedSource {
   for (const f of Object.keys(ALIASES) as Field[]) col[f] = pick(keys, f);
   const tipPick = chooseTip(candidates(keys, "tip"), (c) => arr.map((o: any) => text(o?.[c])));
   col.tip = tipPick.column;
+  const catCols = categorySources(keys, col.tip);
 
   if (!col.name) {
     throw new Error(
@@ -397,7 +424,7 @@ function parseJson(raw: string, askDate: string): ParsedSource {
   let skipped = 0;
   for (const o of arr) {
     const name = text(col.name ? o[col.name] : "");
-    const tip = text(col.tip ? o[col.tip] : "");
+    const tip = categoryOf(catCols, (c) => text(o[c])) ?? text(col.tip ? o[col.tip] : "");
     const vid = text(col.vid ? o[col.vid] : "");
     if (!name && !tip && !vid) {
       skipped++;
@@ -452,6 +479,7 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
     return body.map((cells) => cells[i] ?? "");
   });
   col.tip = tipPick.column;
+  const catCols = categorySources(keys, col.tip);
   if (!col.name)
     throw new Error("Не найдена колонка номенклатуры. Заголовок: " + header.join(" | "));
   const at = (cells: string[], f: Field) => {
@@ -464,7 +492,8 @@ function parseDelimited(raw: string, askDate: string): ParsedSource {
   let skipped = 0;
   for (const cells of body) {
     const name = at(cells, "name");
-    const tip = at(cells, "tip");
+    const tip =
+      categoryOf(catCols, (c) => cells[header.indexOf(c)] ?? "") ?? at(cells, "tip");
     const vid = at(cells, "vid");
     if (!name && !tip && !vid) {
       skipped++;

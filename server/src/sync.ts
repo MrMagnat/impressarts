@@ -492,7 +492,7 @@ export async function reloadFrom1c(): Promise<ReloadResult> {
 }
 
 // Поднимается, когда меняются правила разбора и старые снимки надо перечитать.
-const RELOAD_VERSION = "tip-by-content-1";
+const RELOAD_VERSION = "tip-by-content-2";
 
 async function reloadIfRulesChanged(): Promise<void> {
   if (getSetting("reload_version", "") === RELOAD_VERSION || running) return;
